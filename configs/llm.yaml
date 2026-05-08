@@ -1,0 +1,8 @@
+provider: anthropic
+light_model: claude-sonnet-4-6
+heavy_model: claude-opus-4-7
+max_conversation_history: 20
+max_tokens: 4096
+streaming: true
+use_extended_thinking: true
+use_prompt_caching: true
