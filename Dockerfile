@@ -9,19 +9,23 @@ RUN pip install --no-cache-dir build && python -m build --wheel
 FROM python:3.14-slim
 WORKDIR /app
 
-RUN useradd -m -u 1000 trader
+RUN useradd -m -u 1000 trader \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
-RUN mkdir -p /app/configs /app/data /app/logs \
-    && chown -R trader:trader /app
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+RUN mkdir -p /app/configs /app/data /app/logs
 
 ENV TRADER_CONFIGS_DIR=/app/configs \
     TRADER_DATA_DIR=/app/data \
     TRADER_LOGS_DIR=/app/logs \
     LOG_LEVEL=INFO
 
-USER trader
-
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["trader-agent", "telegram"]
