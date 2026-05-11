@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -8,7 +9,7 @@ import httpx
 import pytest
 
 from trader_agent.market.provider import IsYatirimProvider
-from trader_agent.market.types import TimeFrame, TradingSession
+from trader_agent.market.types import Bar, PricePoint, TimeFrame, TradingSession
 
 
 TZ = ZoneInfo("Europe/Istanbul")
@@ -16,13 +17,27 @@ TZ = ZoneInfo("Europe/Istanbul")
 SESSION = TradingSession(start=time(10, 0), end=time(18, 0), timezone=TZ)
 
 
-def _provider(responses: dict[str, object]) -> IsYatirimProvider:
+class _CallCounter:
+    """HTTP isteklerini URL substring'e göre sayar; cache davranış testleri için."""
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    def hit(self, key: str) -> None:
+        self.counts[key] = self.counts.get(key, 0) + 1
+
+
+def _provider(
+    responses: dict[str, object],
+    counter: _CallCounter | None = None,
+) -> IsYatirimProvider:
     """Mock HTTP transport ile provider oluşturur. responses: {url_substring: json_body}"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         for key, body in responses.items():
             if key in url:
+                if counter is not None:
+                    counter.hit(key)
                 return httpx.Response(200, json=body)
         return httpx.Response(404, json={"error": "not found"})
 
@@ -165,3 +180,165 @@ async def test_get_daily_returns_bars():
     assert len(bars) == 1
     assert bars[0].close == 103.0
     assert bars[0].symbol == "THYAO"
+
+
+# ---- Cache davranışı: verimli kullanım kanıtları ------------------------------
+
+def _daily_body(rows: list[dict]) -> dict:
+    return {"ok": True, "value": rows}
+
+
+def _daily_row(date_str: str, close: float = 100.0) -> dict:
+    return {
+        "HGDG_TARIH": date_str,
+        "HGDG_ACILIS": str(close),
+        "HGDG_MAX": str(close),
+        "HGDG_MIN": str(close),
+        "HGDG_KAPANIS": str(close),
+        "HGDG_HACIM": str(close * 1000),
+        "HGDG_AOF": str(close),
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_daily_cache_hit_avoids_api():
+    """İkinci çağrı cache'i kullanır, API'ye gitmez."""
+    counter = _CallCounter()
+    # daily_start (730 gün önce) → bugün arası kapsayacak şekilde geniş bir set
+    today = datetime.now(TZ).date()
+    rows = [_daily_row((today - timedelta(days=i)).strftime("%d-%m-%Y")) for i in range(0, 730, 7)]
+    body = _daily_body(rows)
+
+    async with _provider({"HisseTekil": body}, counter) as provider:
+        await provider.get_daily("THYAO", period=5)
+        api_calls_after_first = counter.counts.get("HisseTekil", 0)
+        await provider.get_daily("THYAO", period=5)
+        api_calls_after_second = counter.counts.get("HisseTekil", 0)
+
+    # İkinci çağrı API'ye gitmemeli
+    assert api_calls_after_second == api_calls_after_first
+
+
+@pytest.mark.asyncio
+async def test_get_daily_concurrent_calls_dedupe_fetch():
+    """Aynı anda 5 çağrı: lock tek fetch garantiler."""
+    counter = _CallCounter()
+    today = datetime.now(TZ).date()
+    rows = [_daily_row((today - timedelta(days=i)).strftime("%d-%m-%Y")) for i in range(0, 730, 7)]
+    body = _daily_body(rows)
+
+    async with _provider({"HisseTekil": body}, counter) as provider:
+        results = await asyncio.gather(*[provider.get_daily("THYAO", period=3) for _ in range(5)])
+
+    assert counter.counts.get("HisseTekil", 0) == 1
+    # Hepsi aynı sonucu almalı
+    assert all(len(r) == 3 for r in results)
+
+
+@pytest.mark.asyncio
+async def test_get_daily_cross_symbol_isolation():
+    """Bir sembol cache'liyken farklı sembol kendi fetch'ini tetikler."""
+    counter = _CallCounter()
+    today = datetime.now(TZ).date()
+    rows = [_daily_row((today - timedelta(days=i)).strftime("%d-%m-%Y")) for i in range(0, 730, 7)]
+    body = _daily_body(rows)
+
+    async with _provider({"HisseTekil": body}, counter) as provider:
+        await provider.get_daily("THYAO", period=1)
+        await provider.get_daily("GARAN", period=1)
+
+    # İki farklı sembol için iki ayrı fetch
+    assert counter.counts.get("HisseTekil", 0) == 2
+
+
+# ---- Intraday cache davranışı --------------------------------------------------
+
+def _intraday_body(timestamps_ms: list[int], price: float = 100.0) -> dict:
+    return {"data": [[ts, price] for ts in timestamps_ms]}
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_get_intraday_cache_hit_avoids_api():
+    """Pencere dolmadan ikinci çağrı: cache hit, API'ye gitmez."""
+    counter = _CallCounter()
+    now = datetime.now(TZ)
+    # Provider _session_bounds delayed_now kullanıyor; mock için seans başından şu ana kadar timestamp üret
+    bounds_end = now - timedelta(minutes=IsYatirimProvider.delay_minutes)
+    session_start = datetime.combine(bounds_end.date(), SESSION.start, tzinfo=TZ)
+    if bounds_end.weekday() >= 5 or bounds_end < session_start:
+        pytest.skip("Hafta sonu veya seans öncesi, mock anlamlı çalışmaz")
+
+    minute_dts = []
+    cur = session_start
+    # cur <= bounds_end: mevcut dakikayı (açık bar) da dahil et
+    while cur <= bounds_end:
+        minute_dts.append(cur)
+        cur += timedelta(minutes=1)
+    body = _intraday_body([_ms(dt) for dt in minute_dts])
+
+    async with _provider({"ChartData": body}, counter) as provider:
+        await provider.get_intraday("THYAO", TimeFrame.M1)
+        first_count = counter.counts.get("ChartData", 0)
+        await provider.get_intraday("THYAO", TimeFrame.M1)
+        second_count = counter.counts.get("ChartData", 0)
+
+    # Pencere içinde ikinci çağrı yeni veri çekmez (son bar kapalı sayılır)
+    assert second_count == first_count
+
+
+@pytest.mark.asyncio
+async def test_get_intraday_concurrent_calls_dedupe_fetch():
+    """Aynı anda gelen intraday çağrıları lock ile dedupe edilir."""
+    counter = _CallCounter()
+    now = datetime.now(TZ)
+    bounds_end = now - timedelta(minutes=IsYatirimProvider.delay_minutes)
+    session_start = datetime.combine(bounds_end.date(), SESSION.start, tzinfo=TZ)
+    if bounds_end.weekday() >= 5 or bounds_end < session_start:
+        pytest.skip("Hafta sonu veya seans öncesi")
+
+    minute_dts = []
+    cur = session_start
+    # cur <= bounds_end: mevcut dakikayı (açık bar) da dahil et
+    while cur <= bounds_end:
+        minute_dts.append(cur)
+        cur += timedelta(minutes=1)
+    body = _intraday_body([_ms(dt) for dt in minute_dts])
+
+    async with _provider({"ChartData": body}, counter) as provider:
+        await asyncio.gather(*[provider.get_intraday("THYAO", TimeFrame.M1) for _ in range(5)])
+
+    assert counter.counts.get("ChartData", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_today_returns_snapshot():
+    """get_today intraday'den günlük snapshot üretir."""
+    counter = _CallCounter()
+    now = datetime.now(TZ)
+    bounds_end = now - timedelta(minutes=IsYatirimProvider.delay_minutes)
+    session_start = datetime.combine(bounds_end.date(), SESSION.start, tzinfo=TZ)
+    if bounds_end.weekday() >= 5 or bounds_end < session_start:
+        pytest.skip("Hafta sonu veya seans öncesi")
+
+    # 3 fiyat noktası: 100, 110 (high), 95 (low) — close = 95
+    pts = [session_start, session_start + timedelta(minutes=1), session_start + timedelta(minutes=2)]
+    body = {"data": [
+        [_ms(pts[0]), 100.0],
+        [_ms(pts[1]), 110.0],
+        [_ms(pts[2]), 95.0],
+    ]}
+
+    async with _provider({"ChartData": body}, counter) as provider:
+        snapshot = await provider.get_today("THYAO")
+
+    assert snapshot is not None
+    assert snapshot.symbol == "THYAO"
+    assert snapshot.timeframe is TimeFrame.D1
+    assert snapshot.open == 100.0
+    assert snapshot.high == 110.0
+    assert snapshot.low == 95.0
+    assert snapshot.close == 95.0

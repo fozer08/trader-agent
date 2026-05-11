@@ -1,239 +1,157 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from bisect import bisect_left, bisect_right
+from datetime import datetime, timedelta
+from operator import attrgetter
 
-from .types import Bar, TimeFrame, TradingSession
+from .types import Bar, TimeFrame
+
+_dt_key = attrgetter("datetime")
 
 
-class MarketIntradayCache:
-    """Tek seanslık gün içi barlar için bellek içi cache.
+class MarketBarCache:
+    """Sembol ve timeframe bazında datetime'a göre sıralı barları tutan bellek içi cache.
 
-    Cache anahtarı sembol, timeframe ve seans tarihinden oluşur. Yalnızca aktif
-    seansı tutar; böylece tekrarlanan provider çağrıları sadece eksik kuyruğu
-    çekerken hâlâ açık olan son barın yenilenmesine izin verir.
+    Kontrat:
+    - Çağıran, set'e contiguous (gap'siz) bars vermek zorundadır. Cache invariant
+      zorlamaz; gap'li bars set edilirse missing orta gap'leri göremez ve
+      tutarsız sonuç verir.
+    - max_bars bucket başına FIFO limittir; çağıranın bir defada beklediği bar
+      sayısından büyük olmalıdır. Aksi halde set sonrası baştan bar'lar
+      trim'lenir, sonraki missing çağrısı yine "start kapsanmıyor" der ve
+      sonsuz re-fetch döngüsüne yol açabilir.
+    - Tip güvenliği: Bar frozen dataclass, depolanan barlar mutasyon edilmez.
     """
 
-    def __init__(
-        self,
-        session_start: time,
-    ) -> None:
-        """Eksik aralık sınırlarında ``session_start`` kullanan cache oluşturur."""
-        self.session_start = session_start
-        self._bars: dict[tuple[str, TimeFrame, date], list[Bar]] = {}
+    def __init__(self, max_bars: int = 500) -> None:
+        self._max_bars = max_bars
+        self._buckets: dict[tuple[str, TimeFrame], list[Bar]] = {}
 
     def get(
         self,
         symbol: str,
-        timeframe: TimeFrame,
-        *,
-        start: datetime | None = None,
-        end: datetime | None = None,
-    ) -> list[Bar]:
-        """Sembol/timeframe için cache'lenmiş barları, gerekirse zamana göre kırparak döndürür."""
-        session_date = self._session_date(start, end)
-        bars = self._bars.get((symbol, timeframe, session_date), [])
+        tf: TimeFrame,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar] | None:
+        """[start, end] aralığındaki bar'ları döndürür (iki uç da inclusive).
 
-        if start is None and end is None:
-            # Shallow copy is enough because Bar is frozen; callers cannot mutate items.
-            return bars.copy()
-
-        result: list[Bar] = []
-        for bar in bars:
-            if start is not None and bar.datetime < start:
-                continue
-            if end is not None and bar.datetime > end:
-                break
-            result.append(bar)
-
+        start ve end birer bar datetime'ı olarak cache'te bulunmalıdır; aksi
+        halde None döner. Bu tasarım çağıranı exact boundary tutmaya zorlar;
+        kısmi sonuçlar için last_n veya last kullanılır.
+        """
+        inner = self._buckets.get((symbol, tf), [])
+        # Sıralı liste üzerinde O(log n) range arama: bisect_left start dahil, bisect_right end dahil
+        lo = bisect_left(inner, start, key=_dt_key)
+        hi = bisect_right(inner, end, key=_dt_key)
+        result = inner[lo:hi]
+        # Sınırların ikisi de bar olarak cache'te bulunmalı; aksi halde "veri var" denilemez
+        if not result or result[0].datetime != start or result[-1].datetime != end:
+            return None
         return result
 
-    def missing_range(
+    def set(
         self,
         symbol: str,
-        timeframe: TimeFrame,
-        *,
-        end: datetime,
-    ) -> tuple[datetime, datetime] | None:
-        """``end`` zamanına kadar hâlâ çekilmesi gereken aralığı döndürür.
-
-        Son cache barı kapalıysa çekim ondan sonraki bardan başlar. Son bar
-        hâlâ açıksa çekim o barın zamanından başlar; böylece yeni veri merge
-        sırasında açık barın yerine geçebilir.
-        """
-        session_date = end.date()
-        self._prune_except(session_date)
-        session_start = self._session_start_datetime(session_date, end)
-        bars = self._bars.get((symbol, timeframe, session_date), [])
-        last_bar = None
-        for bar in reversed(bars):
-            if bar.datetime <= end:
-                last_bar = bar
-                break
-
-        if last_bar is None:
-            return session_start, end
-
-        next_start = last_bar.datetime
-        if last_bar.is_closed:
-            next_start += timedelta(minutes=timeframe.minutes)
-        next_start = max(next_start, session_start)
-
-        if next_start > end:
-            return None
-
-        return next_start, end
-
-    def merge(
-        self,
-        symbol: str,
-        timeframe: TimeFrame,
+        tf: TimeFrame,
         bars: list[Bar],
     ) -> None:
-        """Sıralı veya sırasız barları cache'e ekler, aynı zamanlı barları yenisiyle değiştirir."""
+        """Sıralı ve contiguous bars'ı bucket'a yazar.
+
+        Çağıran sıralılığı ve ardışıklığı garanti etmelidir (sınıf kontratına
+        bakınız). Aynı datetime'daki eski bar üzerine yazılır. Kapasite
+        aşılırsa en eski barlar baştan silinir (FIFO).
+        """
         if not bars:
             return
 
-        session_date = bars[0].datetime.date()
-        self._prune_except(session_date)
-        self._validate_bars(symbol, timeframe, session_date, bars)
+        inner = self._buckets.setdefault((symbol, tf), [])
 
-        key = (symbol, timeframe, session_date)
-        existing = self._bars.get(key, [])
-        incoming = self._dedupe_sorted(bars)
+        # Streaming'de sık karşılaşılan hızlı yol: yeni barlar tamamen sondan ekleniyor
+        if not inner or bars[0].datetime > inner[-1].datetime:
+            inner.extend(bars)
+        else:
+            # Overlap durumu: bars'ın datetime aralığına denk gelen eski barlar slice ile değiştirilir
+            # bisect_left/right ile kapsama tam denk gelir; aynı timestamp'teki eskiler ezilir
+            lo = bisect_left(inner, bars[0].datetime, key=_dt_key)
+            hi = bisect_right(inner, bars[-1].datetime, key=_dt_key)
+            inner[lo:hi] = bars
 
-        if not existing:
-            self._bars[key] = incoming
-            return
+        # Kapasite sınırı: en eski barlar baştan silinir (FIFO)
+        excess = len(inner) - self._max_bars
+        if excess > 0:
+            del inner[:excess]
 
-        merged: list[Bar] = []
-        existing_index = 0
-        incoming_index = 0
+    def last(self, symbol: str, tf: TimeFrame) -> Bar | None:
+        """Cache'in son barını veya bucket boşsa None döndürür."""
+        inner = self._buckets.get((symbol, tf), [])
+        return inner[-1] if inner else None
 
-        while existing_index < len(existing) and incoming_index < len(incoming):
-            current = existing[existing_index]
-            new = incoming[incoming_index]
+    def last_n(self, symbol: str, tf: TimeFrame, n: int) -> list[Bar]:
+        """Cache'in son n barını döndürür; n <= 0 ise boş liste."""
+        if n <= 0:
+            return []
+        inner = self._buckets.get((symbol, tf), [])
+        return list(inner[-n:])
 
-            if current.datetime < new.datetime:
-                merged.append(current)
-                existing_index += 1
-            elif current.datetime > new.datetime:
-                merged.append(new)
-                incoming_index += 1
-            else:
-                merged.append(new)
-                existing_index += 1
-                incoming_index += 1
-
-        merged.extend(existing[existing_index:])
-        merged.extend(incoming[incoming_index:])
-        self._bars[key] = merged
-
-    @staticmethod
-    def _session_date(
-        start: datetime | None,
-        end: datetime | None,
-    ) -> date:
-        """Sorgu başlangıç veya bitiş zamanından seans tarihini çıkarır."""
-        if start is not None:
-            return start.date()
-        if end is not None:
-            return end.date()
-        raise ValueError("start or end is required.")
-
-    @staticmethod
-    def _dedupe_sorted(
-        bars: list[Bar],
-    ) -> list[Bar]:
-        """Barları zamana göre sıralar ve aynı zamandaki kayıtlarda son barı tutar."""
-        deduped: dict[datetime, Bar] = {}
-        for bar in bars:
-            deduped[bar.datetime] = bar
-        return sorted(deduped.values(), key=lambda bar: bar.datetime)
-
-    def _session_start_datetime(
+    def missing(
         self,
-        session_date: date,
-        end: datetime,
-    ) -> datetime:
-        """Sorgu timezone'u ile uyumlu, timezone-aware seans başlangıcı oluşturur."""
-        return datetime.combine(
-            session_date,
-            self.session_start,
-            tzinfo=end.tzinfo,
-        )
-
-    def _prune_except(
-        self,
-        session_date: date,
-    ) -> None:
-        """``session_date`` dışındaki cache'lenmiş seansları siler."""
-        stale_keys = [
-            key
-            for key in self._bars
-            if key[2] != session_date
-        ]
-        for key in stale_keys:
-            del self._bars[key]
-
-    @staticmethod
-    def _validate_bars(
         symbol: str,
-        timeframe: TimeFrame,
-        session_date: date,
-        bars: list[Bar],
-    ) -> None:
-        """Gelen barların saklanacakları cache anahtarıyla uyumlu olduğunu doğrular."""
-        for bar in bars:
-            if bar.symbol != symbol:
-                raise ValueError(f"Unexpected cache symbol: {bar.symbol!r}")
-            if bar.timeframe is not timeframe:
-                raise ValueError(f"Unexpected cache timeframe: {bar.timeframe!r}")
-            if bar.datetime.date() != session_date:
-                raise ValueError(f"Unexpected cache session date: {bar.datetime.date()!r}")
+        tf: TimeFrame,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[datetime, datetime] | None:
+        """Eksik aralığı (start_dt, end_dt) olarak döndürür; tam kapsama varsa None.
 
+        Tuple'ın iki ucu da inclusive datetime'dır. Yalnızca sınırlara
+        (first_dt, last_dt) bakar; orta gap'leri taramaz. Bu yüzden çağıran,
+        set'e contiguous bars vermek zorundadır (sınıf kontratı).
 
-class MarketDailyCache:
-    """Günlük barlar için bellek içi cache.
-
-    Staleness kararı son barın ``is_closed`` durumuna ve tarihine göre verilir;
-    provider'ın ``is_closed`` semantiği değişse bile doğru çalışır.
-    """
-
-    def __init__(self, session: TradingSession, delay_minutes: int) -> None:
-        self._timezone = session.timezone
-        self._session_end = session.end
-        self._delay_minutes = delay_minutes
-        self._bars: dict[str, list[Bar]] = {}
-
-    def get(self, symbol: str, period: int) -> list[Bar] | None:
-        """Cache'li barları döndürür; stale veya yetersizse None."""
-        bars = self._bars.get(symbol)
-        if bars is None or self._is_stale(bars):
+        Son bar açık (is_closed=False) ise değeri canlıdır; penceresi geçtiyse
+        yeniden çekilmek üzere missing'e dahil edilir. Pencere içindeyse None.
+        """
+        inner = self._buckets.get((symbol, tf), [])
+        if not inner:
+            return start, end
+        
+        last_bar = inner[-1]
+        first_dt = inner[0].datetime
+        last_dt = last_bar.datetime
+        
+        # start kapsanmıyor (ilk bar daha geç ya da son bar daha önce): tüm aralık eksik
+        if first_dt > start or last_dt < start:
+            return start, end
+        
+        if last_bar.is_closed:
+            # Standart kuyruk kontrolü: son bar kapalı, end aşılmışsa eksik kuyruk var
+            if last_dt < end:
+                return last_dt + timedelta(minutes=tf.minutes), end
             return None
-        if len(bars) < period:
+        
+        # Son bar açık: penceresi henüz dolmamışsa API'de yeni veri yok
+        next_window = last_dt + timedelta(minutes=tf.minutes)
+        if end < next_window:
             return None
-        return bars[-period:]
+        
+        # Pencere geçti: açık bar dahil yeniden çek (değeri nihai olabilir, sonrası da gelebilir)
+        return last_dt, end
 
-    def set(self, symbol: str, bars: list[Bar]) -> None:
-        """Sembol için bar listesini cache'e yazar."""
-        if bars:
-            self._bars[symbol] = bars
+    def clear(self, symbol: str, tf: TimeFrame) -> None:
+        """Belirli sembol/timeframe bucket'ını siler; yoksa no-op."""
+        self._buckets.pop((symbol, tf), None)
 
-    # ---- private -------------------------------------------------------------
+    def clear_all(self) -> None:
+        """Tüm bucket'ları siler."""
+        self._buckets.clear()
 
-    def _is_stale(self, bars: list[Bar]) -> bool:
-        last = bars[-1]
-        if not last.is_closed:
-            return True
-        today = datetime.now(tz=self._timezone).date()
-        if today > last.datetime.date():
-            return self._is_bar_closed(today)
-        return False
+    def keys(self) -> list[tuple[str, TimeFrame]]:
+        """Cache'te bulunan tüm (symbol, tf) anahtarları."""
+        return list(self._buckets.keys())
 
-    def _is_bar_closed(self, bar_date: date) -> bool:
-        delayed_now = datetime.now(tz=self._timezone) - timedelta(minutes=self._delay_minutes)
-        if bar_date < delayed_now.date():
-            return True
-        if bar_date > delayed_now.date():
-            return False
-        return delayed_now.time() >= self._session_end
+    def size(self, symbol: str, tf: TimeFrame) -> int:
+        """Belirli bucket'taki bar sayısı."""
+        return len(self._buckets.get((symbol, tf), []))
+
+    def __len__(self) -> int:
+        """Cache'teki bucket sayısı (toplam bar değil; bar sayısı için size())."""
+        return len(self._buckets)
