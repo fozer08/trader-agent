@@ -11,7 +11,10 @@ from ..config.llm import LLMConfig
 from ..market.helpers import is_weekday
 from ..market.types import TradingSession
 from ..tools.base import Tool
+from ..utils.logging import get_logger
 from .prompts import CONTEXT_PROMPT, FORMAT_PROMPTS, SYSTEM_PROMPT
+
+_log = get_logger(__name__)
 
 
 class AgentRunner:
@@ -36,7 +39,7 @@ class AgentRunner:
         self._session = session
         self._output_format = output_format
         self._tools = {t.name: t for t in tools}
-        self._tool_schemas = [t.to_api_dict() for t in tools]
+        self._tool_schemas = _build_tool_schemas(tools, config.use_prompt_caching)
         self._history: list[dict] = []
         self._client = anthropic.AsyncAnthropic(api_key=config.api_key)
 
@@ -54,11 +57,9 @@ class AgentRunner:
         self._history.append({"role": "user", "content": user_input})
         self._trim_history()
 
-        tool_calls_made = False
         while True:
-            model = self._config.heavy_model if tool_calls_made else self._config.light_model
             async with self._client.messages.stream(
-                **self._message_params(model),
+                **self._message_params(self._config.heavy_model),
             ) as stream:
                 async for event in stream:
                     if (
@@ -68,6 +69,8 @@ class AgentRunner:
                         yield event.delta.text
 
                 final = await stream.get_final_message()
+
+            _log_usage(final)
 
             assistant_content = []
             tool_use_blocks = []
@@ -91,7 +94,6 @@ class AgentRunner:
             if final.stop_reason != "tool_use":
                 break
 
-            tool_calls_made = True
             tool_results = []
             for block in tool_use_blocks:
                 tool = self._tools.get(block.name)
@@ -135,7 +137,7 @@ class AgentRunner:
             {
                 "type": "text",
                 "text": static_prompt,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
             },
             {
                 "type": "text",
@@ -145,17 +147,19 @@ class AgentRunner:
 
     def _build_system_text_parts(self) -> tuple[str, str]:
         now = self._now()
+        weekday = is_weekday(now)
         session_open = (
-            is_weekday(now)
+            weekday
             and now.time() >= self._session.start
             and now.time() < self._session.end
         )
-        session_timing = ""
         session_status = (
             f"AÇIK ({self._session.start.strftime('%H:%M')}–{self._session.end.strftime('%H:%M')})"
             if session_open
             else f"KAPALI (seans saatleri: {self._session.start.strftime('%H:%M')}–{self._session.end.strftime('%H:%M')})"
         )
+        session_phase = _session_phase(now, self._session, weekday, session_open)
+        session_timing = ""
         if session_open:
             session_end = datetime.combine(now.date(), self._session.end, tzinfo=now.tzinfo)
             session_timing = f"Seans Kapanışına Kalan: {_format_remaining(session_end - now)}"
@@ -180,6 +184,7 @@ class AgentRunner:
             date=now.strftime("%d.%m.%Y"),
             time=now.strftime("%H:%M"),
             session_status=session_status,
+            session_phase=session_phase,
             session_timing=session_timing,
         )
         return static_prompt, context_prompt
@@ -210,6 +215,45 @@ class AgentRunner:
 
 def _render_prompt(template: str, **values: str) -> str:
     return Template(template.strip()).safe_substitute(values)
+
+
+def _build_tool_schemas(tools: list[Tool], use_cache: bool) -> list[dict]:
+    schemas = [t.to_api_dict() for t in tools]
+    if use_cache and schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+    return schemas
+
+
+def _log_usage(message: Any) -> None:
+    usage = getattr(message, "usage", None)
+    if usage is None:
+        return
+    _log.info(
+        "usage input=%s output=%s cache_read=%s cache_write=%s",
+        getattr(usage, "input_tokens", 0),
+        getattr(usage, "output_tokens", 0),
+        getattr(usage, "cache_read_input_tokens", 0),
+        getattr(usage, "cache_creation_input_tokens", 0),
+    )
+
+
+def _session_phase(now: datetime, session: TradingSession, weekday: bool, session_open: bool) -> str:
+    """Şu anki anı seans fazına eşler.
+
+    Faz etiketleri prompt'taki "Seans-Bilinçli Davranış" bölümüyle eşleşir.
+    """
+    if not weekday:
+        return "hafta sonu"
+    if not session_open:
+        return "pre-market" if now.time() < session.start else "post-market"
+
+    session_start = datetime.combine(now.date(), session.start, tzinfo=now.tzinfo)
+    session_end = datetime.combine(now.date(), session.end, tzinfo=now.tzinfo)
+    if now - session_start < timedelta(minutes=30):
+        return "açılış (ilk 30 dk)"
+    if session_end - now <= timedelta(hours=1):
+        return "kapanışa yaklaşıyor (son 1 saat)"
+    return "orta seans"
 
 
 def _format_remaining(delta: timedelta) -> str:

@@ -62,10 +62,10 @@ class AnalysisTools:
             if len(bars) < 2:
                 return self._with_delay({"symbol": symbol, "error": "insufficient data"})
             lvl = compute_levels(bars)
-            return self._with_delay({
+            return self._with_delay(_drop_none({
                 "symbol": symbol,
                 "levels": _levels_to_dict(lvl),
-            })
+            }))
         except Exception as exc:
             return self._with_delay({"symbol": symbol, "error": str(exc)})
 
@@ -75,13 +75,12 @@ class AnalysisTools:
             Tool(
                 name="scan",
                 description=(
-                    "Birden fazla hisseyi hızlıca tarar. "
-                    "symbols verilmezse tüm takip listesi taranır. "
-                    "Her hisse için: d1 (önceki kapanış bazlı) — EMA trend/hizalama, RSI, ATR, göreceli hacim, mum; "
+                    "Birden fazla hisseyi hızlıca tarar; geniş piyasa görünümü ve fırsat arama için kullan. "
+                    "symbols verilmezse tüm takip listesi taranır. Her hisse için: "
+                    "d1 (önceki kapanış bazlı) — EMA trend/hizalama, RSI, ATR, göreceli hacim, mum formasyonu; "
                     "session (seans açıksa) — canlı fiyat, % değişim, gap, gün içi yüksek/düşük/aralık, "
-                    "canlı fiyatın D1 EMA'ya göre konumu; seans kapalıysa null. "
-                    "Geniş piyasa taraması, fırsat arama veya hisse önerisi için kullan. "
-                    "Belirli bir hisse için indikatör detayı, giriş zamanlaması veya stop/hedef gerekiyorsa get_technicals kullan."
+                    "canlı fiyatın D1 EMA'sına göre konumu; seans kapalıysa session alanı yer almaz. "
+                    "İndikatör detayı, intraday momentum (M15/M5) veya giriş/stop/hedef hesaplaması gerekiyorsa get_technicals kullan."
                 ),
                 input_schema={
                     "type": "object",
@@ -102,12 +101,12 @@ class AnalysisTools:
             Tool(
                 name="get_technicals",
                 description=(
-                    "Az sayıda belirli hisse için kapsamlı teknik analiz yapar; geniş tarama için scan kullan. "
+                    "Belirli hisseler için kapsamlı teknik analiz; detaylı karar ve seviye hesaplaması için kullan. "
+                    "Geniş tarama için scan tercih edilmeli. "
                     "d1.indicators: EMA trend/hizalama, RSI (+ bullish/bearish uyumsuzluk), MACD histogram, ATR, Bollinger width/pct_b. "
                     "d1.levels: pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, haftalık aralık, mum formasyonu, göreceli hacim. "
-                    "session (seans açıksa): canlı fiyat, % değişim, gap, gün içi aralık/konum, price_vs_ema; seans kapalıysa null. "
-                    "m15/m5: seans açıksa gün içi EMA, RSI, ATR, Bollinger; seans kapalıysa bu alanlar dönmez. "
-                    "Detaylı analiz, giriş zamanlaması veya stop/hedef hesaplamak için kullan."
+                    "session (seans açıksa): canlı fiyat, % değişim, gap, gün içi aralık/konum, price_vs_ema. "
+                    "m15/m5 (seans açıksa): intraday EMA, RSI, ATR, Bollinger; seans kapalıysa bu alanlar yer almaz."
                 ),
                 input_schema={
                     "type": "object",
@@ -125,10 +124,9 @@ class AnalysisTools:
             Tool(
                 name="get_levels",
                 description=(
-                    "Tek bir hisse için yalnızca fiyat yapısını döner: "
-                    "pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, haftalık aralık, mum formasyonu, göreceli hacim. "
-                    "Sadece destek/direnç veya stop seviyesi sorulduğunda kullan. "
-                    "EMA, RSI gibi indikatörler de gerekiyorsa get_technicals kullan (levels zaten içinde döner)."
+                    "Tek bir hisse için yalnızca fiyat yapısını döner; sadece destek/direnç veya stop seviyesi sorulduğunda kullan. "
+                    "Döner: pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, haftalık aralık, mum formasyonu, göreceli hacim. "
+                    "EMA, RSI gibi indikatörler de gerekiyorsa get_technicals kullan (levels onun içinde de döner)."
                 ),
                 input_schema={
                     "type": "object",
@@ -159,10 +157,10 @@ class AnalysisTools:
             ind = compute(bars)
             lvl = compute_levels(bars)
 
-            return self._with_delay({
+            return self._with_delay(_drop_none({
                 "symbol": symbol,
                 "name": entry.get("name", symbol),
-                "d1": {
+                "d1": _drop_none({
                     "close": bars[-1].close,
                     "ema_trend": ind.ema_trend,
                     "ema_alignment": ind.ema_alignment,
@@ -170,9 +168,9 @@ class AnalysisTools:
                     "atr": ind.atr,
                     "relative_volume": lvl.relative_volume,
                     "candle": lvl.candle.name if lvl.candle else None,
-                },
+                }),
                 "session": _build_session(today_bar, lvl.prev_close, bars, ind.ema_fast),
-            })
+            }))
         except Exception as exc:
             return self._with_delay({"symbol": symbol, "error": str(exc)})
 
@@ -225,10 +223,12 @@ class AnalysisTools:
         }
 
         if session_active:
-            result["m15"] = m15
-            result["m5"] = m5
+            if m15 is not None:
+                result["m15"] = m15
+            if m5 is not None:
+                result["m5"] = m5
 
-        return self._with_delay(result)
+        return self._with_delay(_drop_none(result))
 
     def _with_delay(self, result: dict) -> dict:
         if self._delay_minutes is not None:
@@ -251,7 +251,7 @@ def _build_session(
         round((today_bar.close - today_bar.low) / day_range * 100, 1)
         if day_range > 0 else 50.0
     )
-    return {
+    return _drop_none({
         "current_price": today_bar.close,
         "change_pct": _change_pct(today_bar.close, prev_close),
         "gap_pct": _change_pct(today_bar.open, prev_close),
@@ -262,7 +262,7 @@ def _build_session(
         "volume": today_bar.volume,
         "relative_volume": _session_relative_volume(today_bar, bars),
         "price_vs_ema": _price_vs_ema(today_bar.close, ema_fast),
-    }
+    })
 
 
 # ---- Helpers -----------------------------------------------------------------
@@ -290,7 +290,7 @@ def _session_relative_volume(today_bar: IntradaySnapshot, bars: list[Bar]) -> fl
 
 
 def _indicators_to_dict(ind: IndicatorSet) -> dict:
-    return {
+    return _drop_none({
         "ema_trend": ind.ema_trend,
         "ema_alignment": ind.ema_alignment,
         "rsi": ind.rsi,
@@ -299,11 +299,11 @@ def _indicators_to_dict(ind: IndicatorSet) -> dict:
         "atr": ind.atr,
         "bb_width": ind.bb.width if ind.bb else None,
         "bb_pct_b": ind.bb.pct_b if ind.bb else None,
-    }
+    })
 
 
 def _levels_to_dict(lvl: PriceLevels) -> dict:
-    return {
+    return _drop_none({
         "prev_high": lvl.prev_high,
         "prev_low": lvl.prev_low,
         "prev_close": lvl.prev_close,
@@ -312,4 +312,8 @@ def _levels_to_dict(lvl: PriceLevels) -> dict:
         "weekly_low": lvl.weekly_low,
         "candle": dataclasses.asdict(lvl.candle) if lvl.candle else None,
         "relative_volume": lvl.relative_volume,
-    }
+    })
+
+
+def _drop_none(d: dict) -> dict:
+    return {k: v for k, v in d.items() if v is not None}

@@ -12,12 +12,14 @@ from .base import Base
 
 @dataclass(frozen=True)
 class Position:
-    """Portföyde tek bir pozisyon. avg_cost hisse başına TL."""
+    """Portföyde tek bir pozisyon. avg_cost, stop_loss, target hisse başına TL."""
 
     symbol: str
     quantity: int
     avg_cost: float
     updated_at: datetime
+    stop_loss: float | None = None
+    target: float | None = None
 
 
 class PositionORM(Base):
@@ -26,6 +28,8 @@ class PositionORM(Base):
     symbol: Mapped[str] = mapped_column(String, primary_key=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     avg_cost: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -35,14 +39,27 @@ class PositionRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._session_factory = session_factory
 
-    def add(self, symbol: str, quantity: int, avg_cost: float) -> tuple[Position, Position | None]:
+    def add(
+        self,
+        symbol: str,
+        quantity: int,
+        avg_cost: float,
+        stop_loss: float | None = None,
+        target: float | None = None,
+    ) -> tuple[Position, Position | None]:
         """Pozisyon ekler veya weighted-average ile günceller.
 
+        Quantity ve avg_cost weighted-average ile birleşir.
+        stop_loss/target verilirse mevcut değerin üzerine yazılır; None ise korunur.
         Döner: (yeni_pozisyon, önceki_pozisyon_veya_None).
         """
         symbol = _normalize_symbol(symbol)
         _validate_quantity(quantity)
-        _validate_cost(avg_cost)
+        _validate_price(avg_cost, "avg_cost")
+        if stop_loss is not None:
+            _validate_price(stop_loss, "stop_loss")
+        if target is not None:
+            _validate_price(target, "target")
 
         with self._session_factory() as session:
             row = session.get(PositionORM, symbol)
@@ -53,6 +70,8 @@ class PositionRepository:
                     symbol=symbol,
                     quantity=quantity,
                     avg_cost=avg_cost,
+                    stop_loss=stop_loss,
+                    target=target,
                     updated_at=_utc_now(),
                 )
                 session.add(row)
@@ -60,10 +79,44 @@ class PositionRepository:
                 new_qty = row.quantity + quantity
                 row.avg_cost = (row.quantity * row.avg_cost + quantity * avg_cost) / new_qty
                 row.quantity = new_qty
+                if stop_loss is not None:
+                    row.stop_loss = stop_loss
+                if target is not None:
+                    row.target = target
                 row.updated_at = _utc_now()
 
             session.commit()
             return _to_position(row), previous
+
+    def set_levels(
+        self,
+        symbol: str,
+        stop_loss: float | None = None,
+        target: float | None = None,
+    ) -> Position:
+        """Sadece stop_loss ve/veya target günceller; quantity'ye dokunmaz.
+
+        None geçilen alan korunur. Pozisyon yoksa KeyError fırlatır.
+        """
+        if stop_loss is None and target is None:
+            raise ValueError("stop_loss veya target'tan en az biri verilmeli.")
+        if stop_loss is not None:
+            _validate_price(stop_loss, "stop_loss")
+        if target is not None:
+            _validate_price(target, "target")
+
+        symbol = _normalize_symbol(symbol)
+        with self._session_factory() as session:
+            row = session.get(PositionORM, symbol)
+            if row is None:
+                raise KeyError(symbol)
+            if stop_loss is not None:
+                row.stop_loss = stop_loss
+            if target is not None:
+                row.target = target
+            row.updated_at = _utc_now()
+            session.commit()
+            return _to_position(row)
 
     def remove(self, symbol: str) -> bool:
         symbol = _normalize_symbol(symbol)
@@ -94,6 +147,8 @@ def _to_position(row: PositionORM) -> Position:
         symbol=row.symbol,
         quantity=row.quantity,
         avg_cost=row.avg_cost,
+        stop_loss=row.stop_loss,
+        target=row.target,
         updated_at=row.updated_at,
     )
 
@@ -112,9 +167,9 @@ def _validate_quantity(quantity: int) -> None:
         raise ValueError("quantity must be positive.")
 
 
-def _validate_cost(avg_cost: float) -> None:
-    if avg_cost <= 0:
-        raise ValueError("avg_cost must be positive.")
+def _validate_price(value: float, field: str) -> None:
+    if value <= 0:
+        raise ValueError(f"{field} must be positive.")
 
 
 def _utc_now() -> datetime:

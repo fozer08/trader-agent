@@ -20,8 +20,7 @@ def create_session_factory(engine: Engine) -> Callable[[], Session]:
 
 
 def init_schema(engine: Engine) -> None:
-    """Tüm ORM modeller için tabloları yaratır; mevcut tablolar dokunulmaz."""
-    # Models modülünü import etmek tabloları Base.metadata'ya kaydeder
-    from . import portfolio  # noqa: F401
+    """ORM tablolarını yaratır. Migration yok — schema değişirse DB dosyasını sil."""
+    from . import portfolio, recommendations  # noqa: F401
 
     Base.metadata.create_all(engine)

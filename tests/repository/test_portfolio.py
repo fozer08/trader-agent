@@ -73,6 +73,58 @@ def test_add_rejects_empty_symbol(repo):
         repo.add("   ", 10, 100.0)
 
 
+def test_add_stores_stop_and_target(repo):
+    position, _ = repo.add("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
+    assert position.stop_loss == 90.0
+    assert position.target == 120.0
+
+
+def test_add_preserves_existing_levels_when_omitted(repo):
+    repo.add("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
+    position, _ = repo.add("THYAO", 50, 105.0)
+    assert position.stop_loss == 90.0
+    assert position.target == 120.0
+
+
+def test_add_overwrites_levels_when_given(repo):
+    repo.add("THYAO", 100, 100.0, stop_loss=90.0)
+    position, _ = repo.add("THYAO", 50, 105.0, stop_loss=95.0, target=120.0)
+    assert position.stop_loss == 95.0
+    assert position.target == 120.0
+
+
+def test_add_rejects_non_positive_stop(repo):
+    with pytest.raises(ValueError, match="stop_loss"):
+        repo.add("THYAO", 10, 100.0, stop_loss=0.0)
+
+
+# ---- set_levels --------------------------------------------------------------
+
+def test_set_levels_updates_only_stop(repo):
+    repo.add("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
+    position = repo.set_levels("THYAO", stop_loss=95.0)
+    assert position.stop_loss == 95.0
+    assert position.target == 120.0
+
+
+def test_set_levels_updates_only_target(repo):
+    repo.add("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
+    position = repo.set_levels("THYAO", target=125.0)
+    assert position.stop_loss == 90.0
+    assert position.target == 125.0
+
+
+def test_set_levels_requires_at_least_one(repo):
+    repo.add("THYAO", 100, 100.0)
+    with pytest.raises(ValueError):
+        repo.set_levels("THYAO")
+
+
+def test_set_levels_missing_position_raises(repo):
+    with pytest.raises(KeyError):
+        repo.set_levels("THYAO", stop_loss=10.0)
+
+
 # ---- remove ------------------------------------------------------------------
 
 def test_remove_existing_returns_true(repo):

@@ -31,12 +31,13 @@ def _runner(output_format: str = "plain", now: datetime | None = None) -> AgentR
 def test_system_prompt_is_rendered_from_template():
     now = datetime(2026, 5, 12, 14, 30, tzinfo=ZoneInfo("Europe/Istanbul"))
     prompt = _runner(now=now)._build_system_prompt()
-    assert "Sen BIST'te günlük trading kararları için destek sağlayan bir asistansın." in prompt
+    assert "BIST'te günlük trade yapan bir trader" in prompt
     assert "THYAO: Türk Hava Yolları" in prompt
     assert "AKBNK: AKBNK" in prompt
     assert "$watchlist_lines" not in prompt
     assert "$format_instructions" not in prompt
     assert "$session_timing" not in prompt
+    assert "$session_phase" not in prompt
 
 
 def test_session_remaining_is_included_when_session_is_open():
@@ -51,6 +52,42 @@ def test_session_remaining_is_omitted_when_session_is_closed():
     prompt = _runner(now=now)._build_system_prompt()
     assert "BIST Seans: KAPALI" in prompt
     assert "Seans Kapanışına Kalan" not in prompt
+
+
+def test_session_phase_pre_market():
+    now = datetime(2026, 5, 12, 8, 0, tzinfo=ZoneInfo("Europe/Istanbul"))
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: pre-market" in prompt
+
+
+def test_session_phase_opening():
+    now = datetime(2026, 5, 12, 10, 15, tzinfo=ZoneInfo("Europe/Istanbul"))
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: açılış (ilk 30 dk)" in prompt
+
+
+def test_session_phase_mid():
+    now = datetime(2026, 5, 12, 14, 30, tzinfo=ZoneInfo("Europe/Istanbul"))
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: orta seans" in prompt
+
+
+def test_session_phase_closing():
+    now = datetime(2026, 5, 12, 17, 30, tzinfo=ZoneInfo("Europe/Istanbul"))
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: kapanışa yaklaşıyor (son 1 saat)" in prompt
+
+
+def test_session_phase_post_market():
+    now = datetime(2026, 5, 12, 19, 0, tzinfo=ZoneInfo("Europe/Istanbul"))
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: post-market" in prompt
+
+
+def test_session_phase_weekend():
+    now = datetime(2026, 5, 10, 14, 30, tzinfo=ZoneInfo("Europe/Istanbul"))  # Sunday
+    prompt = _runner(now=now)._build_system_prompt()
+    assert "Seans Fazı: hafta sonu" in prompt
 
 
 def test_markdown_format_prompt_is_loaded():
@@ -74,8 +111,8 @@ def test_system_param_uses_cache_control_when_enabled():
     now = datetime(2026, 5, 12, 14, 30, tzinfo=ZoneInfo("Europe/Istanbul"))
     system = _runner(now=now)._build_system_param()
     assert isinstance(system, list)
-    assert system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "Araç Kullanım Kılavuzu" in system[0]["text"]
+    assert system[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert "Kimlik ve Felsefe" in system[0]["text"]
     assert "Güncel Bağlam" not in system[0]["text"]
     assert "Güncel Bağlam" in system[1]["text"]
     assert "Seans Kapanışına Kalan: 3 saat 30 dakika" in system[1]["text"]
@@ -87,5 +124,5 @@ def test_system_param_is_plain_string_when_prompt_caching_disabled():
     system = runner._build_system_param()
     assert isinstance(system, str)
     assert "cache_control" not in system
-    assert "Araç Kullanım Kılavuzu" in system
+    assert "Kimlik ve Felsefe" in system
     assert "Güncel Bağlam" in system

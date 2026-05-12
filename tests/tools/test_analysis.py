@@ -119,12 +119,12 @@ async def test_scan_d1_structure():
         assert "candle" in r["d1"]
 
 
-async def test_scan_session_null_when_no_today():
+async def test_scan_session_omitted_when_no_today():
     provider = MockProvider(daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")}, today=None)
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.scan()
     for r in results:
-        assert r["session"] is None
+        assert "session" not in r
 
 
 async def test_scan_session_present_when_today_bar():
@@ -173,11 +173,11 @@ async def test_get_technicals_d1_structure():
     assert "close" in r["d1"]
 
 
-async def test_get_technicals_session_null_when_no_today():
+async def test_get_technicals_session_omitted_when_no_today():
     provider = MockProvider(daily={"THYAO": _daily_bars(60)}, today=None)
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.get_technicals(["THYAO"])
-    assert results[0]["session"] is None
+    assert "session" not in results[0]
 
 
 async def test_get_technicals_session_fields_when_today_bar():

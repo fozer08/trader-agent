@@ -12,12 +12,14 @@ from ..env import load_env
 from ..market.provider import IsYatirimProvider
 from ..repository import (
     PositionRepository,
+    RecommendationRepository,
     create_db_engine,
     create_session_factory,
     init_schema,
 )
 from ..tools.analysis import AnalysisTools
 from ..tools.portfolio import PortfolioTools
+from ..tools.recommendations import RecommendationTools
 
 
 # ---- State -------------------------------------------------------------------
@@ -34,12 +36,14 @@ class _RunnerFactory:
         watchlist: list[dict],
         provider: IsYatirimProvider,
         position_repo: PositionRepository,
+        recommendation_repo: RecommendationRepository,
     ) -> None:
         self._cfg = cfg
         self._watchlist = watchlist
         self._tools = [
             *AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list(),
-            *PortfolioTools(repository=position_repo).as_tool_list(),
+            *PortfolioTools(repository=position_repo, provider=provider).as_tool_list(),
+            *RecommendationTools(repository=recommendation_repo).as_tool_list(),
         ]
         self._session = cfg.market.exchanges["bist"].trading_session("equities")
 
@@ -71,11 +75,13 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Watchlist JSON parse hatası: {exc}") from exc
     engine = create_db_engine(cfg.database_path())
     init_schema(engine)
-    position_repo = PositionRepository(create_session_factory(engine))
+    session_factory = create_session_factory(engine)
+    position_repo = PositionRepository(session_factory)
+    recommendation_repo = RecommendationRepository(session_factory)
     async with IsYatirimProvider(
         session=cfg.market.exchanges["bist"].trading_session("equities")
     ) as provider:
-        _runner_factory = _RunnerFactory(cfg, watchlist, provider, position_repo)
+        _runner_factory = _RunnerFactory(cfg, watchlist, provider, position_repo, recommendation_repo)
         _sessions = {}
         try:
             yield
