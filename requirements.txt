@@ -10,3 +10,4 @@ python-telegram-bot>=21
 python-dotenv>=1.0
 fastapi>=0.111
 uvicorn>=0.29
+sqlalchemy>=2.0
