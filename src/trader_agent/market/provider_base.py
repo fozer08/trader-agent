@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .types import Bar, TimeFrame
+from .types import Bar, IntradaySnapshot, TimeFrame
 
 
 class MarketDataProvider(ABC):
@@ -15,7 +15,7 @@ class MarketDataProvider(ABC):
         """Bugünün gün içi barlarını istenen timeframe'de döndürür."""
 
     @abstractmethod
-    async def get_today(self, symbol: str) -> Bar | None:
+    async def get_today(self, symbol: str) -> IntradaySnapshot | None:
         """Bugünün anlık snapshot'ını döndürür."""
 
     @abstractmethod

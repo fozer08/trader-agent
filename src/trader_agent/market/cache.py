@@ -41,11 +41,9 @@ class MarketBarCache:
         kısmi sonuçlar için last_n veya last kullanılır.
         """
         inner = self._buckets.get((symbol, tf), [])
-        # Sıralı liste üzerinde O(log n) range arama: bisect_left start dahil, bisect_right end dahil
         lo = bisect_left(inner, start, key=_dt_key)
         hi = bisect_right(inner, end, key=_dt_key)
         result = inner[lo:hi]
-        # Sınırların ikisi de bar olarak cache'te bulunmalı; aksi halde "veri var" denilemez
         if not result or result[0].datetime != start or result[-1].datetime != end:
             return None
         return result
@@ -67,17 +65,13 @@ class MarketBarCache:
 
         inner = self._buckets.setdefault((symbol, tf), [])
 
-        # Streaming'de sık karşılaşılan hızlı yol: yeni barlar tamamen sondan ekleniyor
         if not inner or bars[0].datetime > inner[-1].datetime:
             inner.extend(bars)
         else:
-            # Overlap durumu: bars'ın datetime aralığına denk gelen eski barlar slice ile değiştirilir
-            # bisect_left/right ile kapsama tam denk gelir; aynı timestamp'teki eskiler ezilir
             lo = bisect_left(inner, bars[0].datetime, key=_dt_key)
             hi = bisect_right(inner, bars[-1].datetime, key=_dt_key)
             inner[lo:hi] = bars
 
-        # Kapasite sınırı: en eski barlar baştan silinir (FIFO)
         excess = len(inner) - self._max_bars
         if excess > 0:
             del inner[:excess]
@@ -103,38 +97,22 @@ class MarketBarCache:
     ) -> tuple[datetime, datetime] | None:
         """Eksik aralığı (start_dt, end_dt) olarak döndürür; tam kapsama varsa None.
 
-        Tuple'ın iki ucu da inclusive datetime'dır. Yalnızca sınırlara
-        (first_dt, last_dt) bakar; orta gap'leri taramaz. Bu yüzden çağıran,
-        set'e contiguous bars vermek zorundadır (sınıf kontratı).
-
-        Son bar açık (is_closed=False) ise değeri canlıdır; penceresi geçtiyse
-        yeniden çekilmek üzere missing'e dahil edilir. Pencere içindeyse None.
+        Tuple'ın iki ucu da inclusive datetime'dır. Cache yalnızca tamamlanmış
+        bar tutar; son bar end'i aşmışsa kuyruk eksiktir.
         """
         inner = self._buckets.get((symbol, tf), [])
         if not inner:
             return start, end
-        
-        last_bar = inner[-1]
+
         first_dt = inner[0].datetime
-        last_dt = last_bar.datetime
-        
-        # start kapsanmıyor (ilk bar daha geç ya da son bar daha önce): tüm aralık eksik
+        last_dt = inner[-1].datetime
+
         if first_dt > start or last_dt < start:
             return start, end
-        
-        if last_bar.is_closed:
-            # Standart kuyruk kontrolü: son bar kapalı, end aşılmışsa eksik kuyruk var
-            if last_dt < end:
-                return last_dt + timedelta(minutes=tf.minutes), end
-            return None
-        
-        # Son bar açık: penceresi henüz dolmamışsa API'de yeni veri yok
-        next_window = last_dt + timedelta(minutes=tf.minutes)
-        if end < next_window:
-            return None
-        
-        # Pencere geçti: açık bar dahil yeniden çek (değeri nihai olabilir, sonrası da gelebilir)
-        return last_dt, end
+
+        if last_dt < end:
+            return last_dt + timedelta(minutes=tf.minutes), end
+        return None
 
     def clear(self, symbol: str, tf: TimeFrame) -> None:
         """Belirli sembol/timeframe bucket'ını siler; yoksa no-op."""

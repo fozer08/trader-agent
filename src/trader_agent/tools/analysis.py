@@ -7,7 +7,7 @@ from ..analysis import compute, compute_levels
 from ..analysis.levels import PriceLevels
 from ..analysis.technical import IndicatorSet
 from ..market.provider_base import MarketDataProvider
-from ..market.types import Bar, TimeFrame
+from ..market.types import Bar, IntradaySnapshot, TimeFrame
 from ..utils.logging import get_logger
 from .base import Tool
 
@@ -28,6 +28,7 @@ class AnalysisTools:
     ) -> None:
         self._provider = provider
         self._watchlist = watchlist
+        self._delay_minutes = getattr(provider, "delay_minutes", None)
 
     # ---- Tool handlers -------------------------------------------------------
 
@@ -59,14 +60,14 @@ class AnalysisTools:
         try:
             bars = await self._provider.get_daily(symbol, period=30)
             if len(bars) < 2:
-                return {"symbol": symbol, "error": "insufficient data"}
+                return self._with_delay({"symbol": symbol, "error": "insufficient data"})
             lvl = compute_levels(bars)
-            return {
+            return self._with_delay({
                 "symbol": symbol,
                 "levels": _levels_to_dict(lvl),
-            }
+            })
         except Exception as exc:
-            return {"symbol": symbol, "error": str(exc)}
+            return self._with_delay({"symbol": symbol, "error": str(exc)})
 
     def as_tool_list(self) -> list[Tool]:
         """Claude agent'ına register edilecek tool listesini döndürür."""
@@ -153,12 +154,12 @@ class AnalysisTools:
                 self._provider.get_today(symbol),
             )
             if len(bars) < 2:
-                return {"symbol": symbol, "error": "insufficient data"}
+                return self._with_delay({"symbol": symbol, "error": "insufficient data"})
 
             ind = compute(bars)
             lvl = compute_levels(bars)
 
-            return {
+            return self._with_delay({
                 "symbol": symbol,
                 "name": entry.get("name", symbol),
                 "d1": {
@@ -171,9 +172,9 @@ class AnalysisTools:
                     "candle": lvl.candle.name if lvl.candle else None,
                 },
                 "session": _build_session(today_bar, lvl.prev_close, bars, ind.ema_fast),
-            }
+            })
         except Exception as exc:
-            return {"symbol": symbol, "error": str(exc)}
+            return self._with_delay({"symbol": symbol, "error": str(exc)})
 
     async def _technicals_one(self, symbol: str, name: str) -> dict:
         try:
@@ -184,16 +185,16 @@ class AnalysisTools:
                 self._provider.get_intraday(symbol, TimeFrame.M5),
             )
         except Exception as exc:
-            return {"symbol": symbol, "error": str(exc)}
+            return self._with_delay({"symbol": symbol, "error": str(exc)})
 
         if len(bars) < 2:
-            return {"symbol": symbol, "error": "Insufficient daily data."}
+            return self._with_delay({"symbol": symbol, "error": "Insufficient daily data."})
 
         try:
             indicators = compute(bars)
             levels = compute_levels(bars)
         except Exception as exc:
-            return {"symbol": symbol, "error": str(exc)}
+            return self._with_delay({"symbol": symbol, "error": str(exc)})
 
         session_active = bool(m15_bars or m5_bars)
 
@@ -227,13 +228,18 @@ class AnalysisTools:
             result["m15"] = m15
             result["m5"] = m5
 
+        return self._with_delay(result)
+
+    def _with_delay(self, result: dict) -> dict:
+        if self._delay_minutes is not None:
+            result["delay_minutes"] = self._delay_minutes
         return result
 
 
 # ---- Session builder ---------------------------------------------------------
 
 def _build_session(
-    today_bar: Bar | None,
+    today_bar: IntradaySnapshot | None,
     prev_close: float,
     bars: list[Bar],
     ema_fast: float | None,
@@ -273,7 +279,7 @@ def _price_vs_ema(close: float, ema_fast: float | None) -> str | None:
     return "above" if close >= ema_fast else "below"
 
 
-def _session_relative_volume(today_bar: Bar, bars: list[Bar]) -> float | None:
+def _session_relative_volume(today_bar: IntradaySnapshot, bars: list[Bar]) -> float | None:
     if today_bar.volume is None:
         return None
     history = [b.volume for b in bars[-21:-1] if b.volume is not None]

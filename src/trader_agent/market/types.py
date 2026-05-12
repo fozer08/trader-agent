@@ -24,11 +24,7 @@ class TimeFrame(Enum):
 
 @dataclass(frozen=True)
 class Bar:
-    """Provider'lar arası normalize OHLCV bar.
-
-    datetime bucket başlangıcı; is_closed bar'ın güvenilir biçimde kapanıp
-    kapanmadığını söyler.
-    """
+    """Provider'lar arası normalize tamamlanmış OHLCV bar."""
 
     symbol: str
     datetime: datetime
@@ -38,7 +34,19 @@ class Bar:
     low: float
     close: float
     volume: float | None
-    is_closed: bool
+
+
+@dataclass(frozen=True)
+class IntradaySnapshot:
+    """Seans içi anlık fiyat özeti."""
+
+    symbol: str
+    datetime: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None
 
 
 @dataclass(frozen=True)

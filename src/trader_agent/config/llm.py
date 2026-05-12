@@ -26,7 +26,7 @@ class LLMConfig(BaseConfig):
     use_prompt_caching: bool = True
     use_extended_thinking: bool = True
     streaming: bool = True
-    max_conversation_history: int = 50
+    max_conversation_history: int = 20
 
     def model_post_init(self, __context):
         if not self.api_key:

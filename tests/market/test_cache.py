@@ -10,14 +10,13 @@ from trader_agent.market.types import Bar, TimeFrame
 UTC = timezone.utc
 
 
-def _bar(dt: str, price: float = 100.0, tf: TimeFrame = TimeFrame.M1, is_closed: bool = True) -> Bar:
+def _bar(dt: str, price: float = 100.0, tf: TimeFrame = TimeFrame.M1) -> Bar:
     return Bar(
         symbol="X",
         datetime=datetime.fromisoformat(dt),
         timeframe=tf,
         open=price, high=price, low=price, close=price,
         volume=None,
-        is_closed=is_closed,
     )
 
 
@@ -308,43 +307,3 @@ def test_missing_returns_none_when_single_bar_covers_point(cache):
     cache.set("X", TimeFrame.M1, [_bar("2026-04-29T10:00:00+00:00")])
     start = end = _dt("2026-04-29T10:00:00+00:00")
     assert cache.missing("X", TimeFrame.M1, start, end) is None
-
-
-# ---- missing: açık bar (is_closed=False) senaryoları --------------------
-
-def test_missing_returns_none_when_open_bar_window_not_passed(cache):
-    # Açık bar 10:00, end aynı dakika içinde → fetch'e gerek yok
-    cache.set("X", TimeFrame.M1, [_bar("2026-04-29T10:00:00+00:00", is_closed=False)])
-    start = _dt("2026-04-29T10:00:00+00:00")
-    end = _dt("2026-04-29T10:00:30+00:00")
-    assert cache.missing("X", TimeFrame.M1, start, end) is None
-
-
-def test_missing_includes_open_bar_when_window_passed(cache):
-    # Açık bar 10:00, end pencerenin ötesinde → açık bar dahil yeniden çekilmeli
-    cache.set("X", TimeFrame.M1, [_bar("2026-04-29T10:00:00+00:00", is_closed=False)])
-    start = _dt("2026-04-29T10:00:00+00:00")
-    end = _dt("2026-04-29T10:05:00+00:00")
-    result = cache.missing("X", TimeFrame.M1, start, end)
-    assert result == (_dt("2026-04-29T10:00:00+00:00"), end)
-
-
-def test_missing_includes_open_bar_when_end_at_next_window(cache):
-    # end tam next_window'a eşitse pencere geçmiş sayılır
-    cache.set("X", TimeFrame.M1, [_bar("2026-04-29T10:00:00+00:00", is_closed=False)])
-    start = _dt("2026-04-29T10:00:00+00:00")
-    end = _dt("2026-04-29T10:01:00+00:00")
-    result = cache.missing("X", TimeFrame.M1, start, end)
-    assert result == (start, end)
-
-
-def test_missing_mixed_closed_then_open_bar(cache):
-    # Kapalı 10:00, açık 10:01, end 10:02 → 10:01 dahil yeniden çek
-    cache.set("X", TimeFrame.M1, [
-        _bar("2026-04-29T10:00:00+00:00", is_closed=True),
-        _bar("2026-04-29T10:01:00+00:00", is_closed=False),
-    ])
-    start = _dt("2026-04-29T10:00:00+00:00")
-    end = _dt("2026-04-29T10:02:00+00:00")
-    result = cache.missing("X", TimeFrame.M1, start, end)
-    assert result == (_dt("2026-04-29T10:01:00+00:00"), end)

@@ -10,7 +10,14 @@ from ..agent.runner import AgentRunner
 from ..config.main import MainConfig
 from ..env import load_env
 from ..market.provider import IsYatirimProvider
+from ..repository import (
+    PositionRepository,
+    create_db_engine,
+    create_session_factory,
+    init_schema,
+)
 from ..tools.analysis import AnalysisTools
+from ..tools.portfolio import PortfolioTools
 
 
 # ---- State -------------------------------------------------------------------
@@ -21,10 +28,19 @@ _sessions: dict[str, AgentRunner] = {}
 
 
 class _RunnerFactory:
-    def __init__(self, cfg: MainConfig, watchlist: list[dict], provider: IsYatirimProvider) -> None:
+    def __init__(
+        self,
+        cfg: MainConfig,
+        watchlist: list[dict],
+        provider: IsYatirimProvider,
+        position_repo: PositionRepository,
+    ) -> None:
         self._cfg = cfg
         self._watchlist = watchlist
-        self._tools = AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list()
+        self._tools = [
+            *AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list(),
+            *PortfolioTools(repository=position_repo).as_tool_list(),
+        ]
         self._session = cfg.market.exchanges["bist"].trading_session("equities")
 
     def make(self, output_format: str = "plain") -> AgentRunner:
@@ -53,14 +69,20 @@ async def lifespan(app: FastAPI):
         watchlist: list[dict] = json.loads(watchlist_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Watchlist JSON parse hatası: {exc}") from exc
+    engine = create_db_engine(cfg.database_path())
+    init_schema(engine)
+    position_repo = PositionRepository(create_session_factory(engine))
     async with IsYatirimProvider(
         session=cfg.market.exchanges["bist"].trading_session("equities")
     ) as provider:
-        _runner_factory = _RunnerFactory(cfg, watchlist, provider)
+        _runner_factory = _RunnerFactory(cfg, watchlist, provider, position_repo)
         _sessions = {}
-        yield
-        _runner_factory = None
-        _sessions = {}
+        try:
+            yield
+        finally:
+            _runner_factory = None
+            _sessions = {}
+            engine.dispose()
 
 
 # ---- App ---------------------------------------------------------------------

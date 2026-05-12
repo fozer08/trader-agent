@@ -4,7 +4,7 @@ import pytest
 
 from trader_agent.config.market import MarketConfig
 from trader_agent.market.provider import IsYatirimProvider
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
 
 
 @pytest.fixture
@@ -32,9 +32,8 @@ async def test_get_intraday_m5(provider):
 
 
 @pytest.mark.integration
-async def test_get_today_returns_bar_or_none(provider):
+async def test_get_today_returns_snapshot_or_none(provider):
     result = await provider.get_today("THYAO")
-    assert result is None or isinstance(result, Bar)
+    assert result is None or isinstance(result, IntradaySnapshot)
     if result is not None:
-        assert result.timeframe is TimeFrame.D1
         assert result.close > 0

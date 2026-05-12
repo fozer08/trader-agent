@@ -7,10 +7,10 @@ import httpx
 
 from ..utils.logging import get_logger
 from .cache import MarketBarCache
-from .helpers import aggregate_bars, calc_session_bounds, ohlcv_from_bars
+from .helpers import aggregate_bars, calc_session_bounds, floor_to_timeframe, ohlcv_from_bars
 from .provider_base import MarketDataProvider
 from .rate_limiter import RateLimiter
-from .types import Bar, PricePoint, TimeFrame, TradingSession
+from .types import Bar, IntradaySnapshot, PricePoint, TimeFrame, TradingSession
 
 _log = get_logger(__name__)
 
@@ -30,7 +30,8 @@ class IsYatirimProvider(MarketDataProvider):
     user_agent = "Mozilla/5.0"
 
     source_tf = TimeFrame.M1          # API'nin desteklediği en küçük çözünürlük
-    _daily_fetch_days = 730           # Günlük fetch penceresinin uzunluğu (gün)
+    _daily_fetch_days = 365           # Günlük fetch penceresinin uzunluğu (gün)
+    _daily_fetch_padding_days = 30    # Trading day hesabındaki tatil/hafta sonu tamponu
 
     intraday_url = (
         "https://www.isyatirim.com.tr/_Layouts/15/"
@@ -58,9 +59,8 @@ class IsYatirimProvider(MarketDataProvider):
             timeout=timeout,
             transport=_transport,
         )
-        self.cache = cache or MarketBarCache()
+        self.cache = cache if cache is not None else MarketBarCache()
         self._rate_limiter = RateLimiter(self.calls_per_minute)
-        # Sembol+timeframe başına lock: aynı veriyi eş zamanlı çağrılar tekrar çekmesin
         self._fetch_locks: dict[tuple[str, TimeFrame], asyncio.Lock] = {}
 
     async def __aenter__(self) -> IsYatirimProvider:
@@ -99,11 +99,11 @@ class IsYatirimProvider(MarketDataProvider):
         return aggregate_bars(
             bars=source_bars,
             target_tf=tf,
-            closed_until=end,
+            closed_until=self._delayed_now(),
             session_start=self.session.start,
         )
 
-    async def get_today(self, symbol: str) -> Bar | None:
+    async def get_today(self, symbol: str) -> IntradaySnapshot | None:
         """Bugünün intraday verisinden derlenen günlük snapshot'ı döndürür.
 
         Daily endpoint'ten değil, intraday'den üretildiği için volume=None olabilir.
@@ -117,19 +117,15 @@ class IsYatirimProvider(MarketDataProvider):
         if not source_bars:
             return None
 
-        # M1 barları doğrudan tek bir günlük OHLCV'ye indirgenir; aggregate_bars'a gerek yok
-        # çünkü ohlcv_from_bars zaten high=max, low=min, close=son bar olarak doğru toplar
         open_, high, low, close, volume = ohlcv_from_bars(source_bars)
-        return Bar(
+        return IntradaySnapshot(
             symbol=symbol,
-            datetime=start,
-            timeframe=TimeFrame.D1,
+            datetime=source_bars[-1].datetime,
             open=open_,
             high=high,
             low=low,
             close=close,
             volume=volume,
-            is_closed=end.time() >= self.session.end,
         )
 
     async def get_daily(self, symbol: str, period: int) -> list[Bar]:
@@ -138,24 +134,31 @@ class IsYatirimProvider(MarketDataProvider):
             raise ValueError("period must be positive.")
 
         symbol = self._normalize_symbol(symbol)
-
-        # daily_start ve last_dt weekday'e snap'lenir; daily bar zaten her trading günde
-        # session.start saatinde doğar. Tatil günleri burada ele alınmaz (kabul edilen sınırlama).
-        today = datetime.now(self.session.timezone).date()
-        daily_start = self._weekday_dt(today - timedelta(days=self._daily_fetch_days), forward=True)
-        last_dt = self._last_completed_daily_dt()
-
-        # Fast path: cache zaten kapsıyorsa lock'a gerek yok
-        if self.cache.missing(symbol, TimeFrame.D1, daily_start, last_dt) is not None:
-            async with self._get_lock((symbol, TimeFrame.D1)):
-                # Double-check: bekleyen başka coroutine bu arada fetch etmiş olabilir
-                missing = self.cache.missing(symbol, TimeFrame.D1, daily_start, last_dt)
-                if missing is not None:
-                    miss_start, miss_end = missing
-                    rows = await self._fetch_daily_rows(symbol, miss_start.date(), miss_end.date())
-                    self.cache.set(symbol, TimeFrame.D1, self._daily_rows_to_bars(symbol, rows))
-
+        await self._fetch_daily_if_needed(symbol, period)
         return self.cache.last_n(symbol, TimeFrame.D1, period)
+
+    async def _fetch_daily_if_needed(self, symbol: str, period: int) -> None:
+        start, end = self._daily_fetch_range(period)
+        if not self._daily_cache_satisfies(symbol, period, end):
+            async with self._get_lock((symbol, TimeFrame.D1)):
+                if self._daily_cache_satisfies(symbol, period, end):
+                    return
+                rows = await self._fetch_daily_rows(symbol, start.date(), end.date())
+                self.cache.set(symbol, TimeFrame.D1, self._daily_rows_to_bars(symbol, rows))
+
+    def _daily_cache_satisfies(self, symbol: str, period: int, expected_end: datetime) -> bool:
+        cached = self.cache.last_n(symbol, TimeFrame.D1, period)
+        return len(cached) >= period and cached[-1].datetime >= expected_end
+
+    def _daily_fetch_range(self, period: int) -> tuple[datetime, datetime]:
+        """API'den çekilecek (start, end) aralığı; period için yeterli takvim günü içerir."""
+        today = datetime.now(self.session.timezone).date()
+        days = max(
+            self._daily_fetch_days,
+            int(period * 7 / 5) + self._daily_fetch_padding_days,
+        )
+        start = self._weekday_dt(today - timedelta(days=days), forward=True)
+        return start, self._last_completed_daily_dt()
 
     def _session_bounds(self) -> tuple[datetime, datetime] | None:
         """Şu an için güvenilir kabul edilen seans aralığını döndürür."""
@@ -166,8 +169,12 @@ class IsYatirimProvider(MarketDataProvider):
             delay_minutes=self.delay_minutes,
         )
 
+    def _delayed_now(self) -> datetime:
+        """Feed gecikmesini düşülmüş wall-clock zamanını döndürür."""
+        return datetime.now(self.session.timezone) - timedelta(minutes=self.delay_minutes)
+
     def _weekday_dt(self, ref: date, *, forward: bool) -> datetime:
-        """Tarihi en yakın haftaiçine kaydırır ve seans başı ile birleştirir (tatil hariç)."""
+        """Tarihi en yakın haftaiçine kaydırır ve seans başı ile birleştirir."""
         # forward=True: cumartesi/pazar olursa pazartesiye atlar; False ise cumaya geri çekilir
         step = timedelta(days=1 if forward else -1)
         while ref.weekday() >= 5:
@@ -177,11 +184,10 @@ class IsYatirimProvider(MarketDataProvider):
     def _last_completed_daily_dt(self) -> datetime:
         """Beklenen son tamamlanmış daily bar'ın datetime'ı.
 
-        Bugünün seansı henüz bitmediyse bugün dahil edilmez; aksi halde
-        cache.missing tail eksik der ve API'den bugüne ait olmayan bar için
-        sonsuz fetch döngüsüne girilir.
+        Bugünün daily barı ancak feed gecikmesiyle birlikte seans bitişi
+        görüldükten sonra tamamlanmış sayılır.
         """
-        delayed_now = datetime.now(self.session.timezone) - timedelta(minutes=self.delay_minutes)
+        delayed_now = self._delayed_now()
         ref = delayed_now.date()
         if delayed_now.time() < self.session.end:
             ref -= timedelta(days=1)
@@ -195,19 +201,24 @@ class IsYatirimProvider(MarketDataProvider):
         start: datetime,
         end: datetime,
     ) -> list[Bar]:
-        """[start, end] aralığındaki M1 barlarını döndürür; eksikse API'den çeker."""
+        """[start, end] aralığındaki source_tf barlarını döndürür; eksikse API'den çeker."""
+        # Cache yalnızca kapanmış barları tuttuğu için aranan üst sınır son kapalı bar başlangıcı
+        cache_end = floor_to_timeframe(
+            end - timedelta(minutes=self.source_tf.minutes),
+            self.source_tf,
+            self.session.start,
+        )
+        if cache_end < start:
+            return []
+
         # Lock: aynı sembol/tf için eş zamanlı çağrılarda tek fetch garantilenir
         async with self._get_lock((symbol, self.source_tf)):
-            missing = self.cache.missing(symbol, self.source_tf, start, end)
-            # cache.missing açık bar refresh dahil tüm fetch kararını veriyor
+            missing = self.cache.missing(symbol, self.source_tf, start, cache_end)
             if missing is not None:
-                fetch_start, _ = missing
-                points = await self._fetch_intraday_points(symbol, fetch_start, end)
-                source_bars = self._price_points_to_bars(symbol, points, end)
-                self.cache.set(symbol, self.source_tf, source_bars)
+                points = await self._fetch_intraday_points(symbol, missing[0], end)
+                bars = self._price_points_to_bars(symbol, points, end)
+                self.cache.set(symbol, self.source_tf, bars)
 
-        # Cache'in fiilen sahip olduğu son bar gerçek end olarak kullanılır;
-        # provider end'in ötesinde fetch yapmadığı için last.datetime <= end invariant'i geçerli
         last = self.cache.last(symbol, self.source_tf)
         if last is None or last.datetime < start:
             return []
@@ -256,7 +267,7 @@ class IsYatirimProvider(MarketDataProvider):
         points: list[PricePoint],
         closed_until: datetime,
     ) -> list[Bar]:
-        """Tek tek fiyat noktalarını M1 barlarına çevirir (O=H=L=C, volume yok)."""
+        """Kapanmış fiyat noktalarını M1 barlarına çevirir (O=H=L=C, volume yok)."""
         window = timedelta(minutes=self.source_tf.minutes)
         return [
             Bar(
@@ -268,9 +279,9 @@ class IsYatirimProvider(MarketDataProvider):
                 low=p.price,
                 close=p.price,
                 volume=None,
-                is_closed=p.datetime + window <= closed_until,
             )
             for p in points
+            if p.datetime + window <= closed_until
         ]
 
     async def _fetch_daily_rows(
@@ -299,8 +310,6 @@ class IsYatirimProvider(MarketDataProvider):
 
     def _daily_rows_to_bars(self, symbol: str, rows: list[dict]) -> list[Bar]:
         """Ham günlük satırları normalize D1 Bar'larına çevirir."""
-        # Tek "şu an" referansı: tüm rows aynı snapshot'a göre kapanış kararı alır
-        delayed_now = datetime.now(self.session.timezone) - timedelta(minutes=self.delay_minutes)
         bars: list[Bar] = []
 
         for row in rows:
@@ -313,7 +322,6 @@ class IsYatirimProvider(MarketDataProvider):
             if close is None:
                 continue
 
-            # Open/High/Low eksikse close ile doldurulur (None kontrolü gerekli; 0.0 geçerli değer)
             raw_open = self._pick_float(row, "HG_ACILIS", "HGDG_ACILIS")
             raw_high = self._pick_float(row, "HG_MAX", "HGDG_MAX")
             raw_low = self._pick_float(row, "HG_MIN", "HGDG_MIN")
@@ -341,21 +349,10 @@ class IsYatirimProvider(MarketDataProvider):
                     low=close if raw_low is None else raw_low,
                     close=close,
                     volume=volume,
-                    is_closed=self._is_daily_bar_closed(bar_date, delayed_now),
                 )
             )
 
         return sorted(bars, key=lambda b: b.datetime)
-
-    def _is_daily_bar_closed(self, bar_date: date, delayed_now: datetime) -> bool:
-        """Günlük bar kapalı sayılıyor mu? (intraday ile aynı feed gecikmesi modeli)"""
-        # Geçmiş gün: kesin kapalı; gelecek gün: kesin açık değil (henüz oluşmamış)
-        if bar_date < delayed_now.date():
-            return True
-        if bar_date > delayed_now.date():
-            return False
-        # Bugün: ancak seans bitişine ulaşıldıysa kapalı kabul edilir
-        return delayed_now.time() >= self.session.end
 
     # ---- HTTP --------------------------------------------------------------
 
@@ -447,7 +444,6 @@ class IsYatirimProvider(MarketDataProvider):
             try:
                 if isinstance(value, str):
                     value = value.strip()
-                    # Türkçe sayı formatı: nokta binlik ayracı, virgül ondalık ("1.234,56" → 1234.56)
                     if "," in value:
                         value = value.replace(".", "").replace(",", ".")
                 return float(value)

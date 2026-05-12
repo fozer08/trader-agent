@@ -33,7 +33,7 @@ def test_aggregate_bars_uses_session_start_alignment_for_hourly_bars():
     assert aggregated[0].high == 12.0
     assert aggregated[0].low == 10.0
     assert aggregated[0].close == 11.0
-    assert aggregated[0].is_closed is True
+    assert len(aggregated) == 2
 
 
 def test_calc_session_bounds_uses_delay_for_reliable_end():
@@ -74,5 +74,4 @@ def _bar(
         low=price,
         close=price,
         volume=None,
-        is_closed=True,
     )

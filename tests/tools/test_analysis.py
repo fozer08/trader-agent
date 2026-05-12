@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from trader_agent.market.provider_base import MarketDataProvider
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
 from trader_agent.tools.analysis import AnalysisTools
 
 
@@ -16,16 +16,18 @@ class MockProvider(MarketDataProvider):
         self,
         daily: dict[str, list[Bar]] | None = None,
         intraday: dict[tuple[str, TimeFrame], list[Bar]] | None = None,
-        today: Bar | None = None,
+        today: IntradaySnapshot | None = None,
+        delay_minutes: int | None = None,
     ) -> None:
         self._daily = daily or {}
         self._intraday = intraday or {}
         self._today = today
+        self.delay_minutes = delay_minutes
 
     async def get_daily(self, symbol: str, period: int) -> list[Bar]:
         return self._daily.get(symbol, [])[-period:]
 
-    async def get_today(self, symbol: str) -> Bar | None:
+    async def get_today(self, symbol: str) -> IntradaySnapshot | None:
         return self._today
 
     async def get_intraday(self, symbol: str, tf: TimeFrame) -> list[Bar]:
@@ -44,7 +46,6 @@ def _bar(i: int, symbol: str = "THYAO", tf: TimeFrame = TimeFrame.D1, close: flo
         low=close - 1,
         close=close,
         volume=1000.0,
-        is_closed=True,
     )
 
 
@@ -54,6 +55,18 @@ def _daily_bars(n: int, symbol: str = "THYAO") -> list[Bar]:
 
 def _intraday_bars(n: int, symbol: str = "THYAO", tf: TimeFrame = TimeFrame.M15) -> list[Bar]:
     return [_bar(i, symbol=symbol, tf=tf, close=100.0 + i * 0.1) for i in range(n)]
+
+
+def _snapshot(symbol: str = "THYAO", close: float = 125.0) -> IntradaySnapshot:
+    return IntradaySnapshot(
+        symbol=symbol,
+        datetime=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        open=close,
+        high=close + 1,
+        low=close - 1,
+        close=close,
+        volume=1000.0,
+    )
 
 
 WATCHLIST = [
@@ -88,10 +101,14 @@ async def test_scan_filtered_when_symbols_given():
 
 
 async def test_scan_d1_structure():
-    provider = MockProvider(daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")})
+    provider = MockProvider(
+        daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")},
+        delay_minutes=15,
+    )
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.scan()
     for r in results:
+        assert r["delay_minutes"] == 15
         assert "d1" in r
         assert "close" in r["d1"]
         assert "ema_trend" in r["d1"]
@@ -111,7 +128,7 @@ async def test_scan_session_null_when_no_today():
 
 
 async def test_scan_session_present_when_today_bar():
-    today_bar = _bar(0, symbol="THYAO", tf=TimeFrame.D1, close=125.0)
+    today_bar = _snapshot(close=125.0)
     provider = MockProvider(daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")}, today=today_bar)
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.scan()
@@ -142,12 +159,13 @@ async def test_scan_handles_missing_symbol_gracefully():
 # ---- get_technicals ----------------------------------------------------------
 
 async def test_get_technicals_d1_structure():
-    provider = MockProvider(daily={"THYAO": _daily_bars(60)})
+    provider = MockProvider(daily={"THYAO": _daily_bars(60)}, delay_minutes=15)
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.get_technicals(["THYAO"])
     assert len(results) == 1
     r = results[0]
     assert r["symbol"] == "THYAO"
+    assert r["delay_minutes"] == 15
     assert r["name"] == "Türk Hava Yolları"
     assert "d1" in r
     assert "indicators" in r["d1"]
@@ -163,7 +181,7 @@ async def test_get_technicals_session_null_when_no_today():
 
 
 async def test_get_technicals_session_fields_when_today_bar():
-    today_bar = _bar(0, symbol="THYAO", tf=TimeFrame.D1, close=125.0)
+    today_bar = _snapshot(close=125.0)
     provider = MockProvider(daily={"THYAO": _daily_bars(60)}, today=today_bar)
     tools = AnalysisTools(provider, WATCHLIST)
     results = await tools.get_technicals(["THYAO"])
@@ -225,10 +243,11 @@ async def test_get_technicals_multiple_symbols():
 # ---- get_levels --------------------------------------------------------------
 
 async def test_get_levels_structure():
-    provider = MockProvider(daily={"THYAO": _daily_bars(30)})
+    provider = MockProvider(daily={"THYAO": _daily_bars(30)}, delay_minutes=15)
     tools = AnalysisTools(provider, WATCHLIST)
     result = await tools.get_levels("THYAO")
     assert result["symbol"] == "THYAO"
+    assert result["delay_minutes"] == 15
     assert "levels" in result
     levels = result["levels"]
     assert "pivot" in levels

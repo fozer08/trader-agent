@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from trader_agent.analysis.levels import compute_levels, compute_session_snapshot
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
 
 
 def _bar(
@@ -25,7 +25,6 @@ def _bar(
         low=low,
         close=close,
         volume=volume,
-        is_closed=True,
     )
 
 
@@ -33,11 +32,61 @@ def _neutral(i: int, price: float = 100.0, volume: float | None = 1000.0) -> Bar
     return _bar(i, price, price + 2, price - 2, price, volume)
 
 
+def _snapshot(
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float | None = 1000.0,
+) -> IntradaySnapshot:
+    return IntradaySnapshot(
+        symbol="TEST",
+        datetime=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+    )
+
+
 # ---- Validasyon ---------------------------------------------------------------
 
 def test_raises_with_fewer_than_2_bars():
     with pytest.raises(ValueError, match="2 bars"):
         compute_levels([_neutral(0)])
+
+
+def test_raises_on_mixed_symbols():
+    bars = [_neutral(0), _neutral(1)]
+    bars[1] = Bar(
+        symbol="OTHER",
+        datetime=bars[1].datetime,
+        timeframe=bars[1].timeframe,
+        open=bars[1].open,
+        high=bars[1].high,
+        low=bars[1].low,
+        close=bars[1].close,
+        volume=bars[1].volume,
+    )
+    with pytest.raises(ValueError, match="same symbol"):
+        compute_levels(bars)
+
+
+def test_raises_on_mixed_timeframes():
+    bars = [_neutral(0), _neutral(1)]
+    bars[1] = Bar(
+        symbol=bars[1].symbol,
+        datetime=bars[1].datetime,
+        timeframe=TimeFrame.M15,
+        open=bars[1].open,
+        high=bars[1].high,
+        low=bars[1].low,
+        close=bars[1].close,
+        volume=bars[1].volume,
+    )
+    with pytest.raises(ValueError, match="same timeframe"):
+        compute_levels(bars)
 
 
 # ---- PDH / PDL / PDC ----------------------------------------------------------
@@ -116,6 +165,15 @@ def test_bullish_engulfing_detected():
     assert levels.candle.bullish is True
 
 
+def test_engulfing_has_priority_over_hammer_shape():
+    prev = _bar(0, open_=105, high=106, low=99, close=100)
+    # Bu mum hem önceki gövdeyi yutuyor hem de uzun alt gölge taşıyor.
+    curr = _bar(1, open_=98, high=112, low=70, close=111)
+    levels = compute_levels([prev, curr])
+    assert levels.candle is not None
+    assert levels.candle.name == "bullish_engulfing"
+
+
 def test_bearish_engulfing_detected():
     # Önceki: yükseliş mumu
     prev = _bar(0, open_=100, high=106, low=99, close=105)
@@ -150,47 +208,47 @@ def test_relative_volume_none_when_volume_missing():
 # ---- compute_session_snapshot ---------------------------------------------------
 
 def test_session_snapshot_change_pct():
-    today = _bar(1, open_=100, high=106, low=99, close=104)
+    today = _snapshot(open_=100, high=106, low=99, close=104)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.change_pct == pytest.approx(4.0)
 
 
 def test_session_snapshot_gap_pct():
     # Dün kapanış 100, bugün açılış 103 → %3 gap up
-    today = _bar(1, open_=103, high=106, low=99, close=104)
+    today = _snapshot(open_=103, high=106, low=99, close=104)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.gap_pct == pytest.approx(3.0)
 
 
 def test_session_snapshot_range_pct():
-    today = _bar(1, open_=100, high=110, low=90, close=105)
+    today = _snapshot(open_=100, high=110, low=90, close=105)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.range_pct == pytest.approx(20.0)
 
 
 def test_session_snapshot_range_position_at_top():
     # close == high → tepe, %100
-    today = _bar(1, open_=100, high=110, low=90, close=110)
+    today = _snapshot(open_=100, high=110, low=90, close=110)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.range_position == pytest.approx(100.0)
 
 
 def test_session_snapshot_range_position_at_bottom():
     # close == low → dip, %0
-    today = _bar(1, open_=100, high=110, low=90, close=90)
+    today = _snapshot(open_=100, high=110, low=90, close=90)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.range_position == pytest.approx(0.0)
 
 
 def test_session_snapshot_range_position_middle():
     # close tam ortada
-    today = _bar(1, open_=100, high=110, low=90, close=100)
+    today = _snapshot(open_=100, high=110, low=90, close=100)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.range_position == pytest.approx(50.0)
 
 
 def test_session_snapshot_fields():
-    today = _bar(1, open_=100, high=106, low=99, close=104, volume=2000.0)
+    today = _snapshot(open_=100, high=106, low=99, close=104, volume=2000.0)
     ctx = compute_session_snapshot(today, prev_close=100.0)
     assert ctx.open == 100
     assert ctx.high == 106
@@ -200,6 +258,6 @@ def test_session_snapshot_fields():
 
 
 def test_session_snapshot_raises_on_zero_prev_close():
-    today = _bar(1, open_=100, high=106, low=99, close=104)
+    today = _snapshot(open_=100, high=106, low=99, close=104)
     with pytest.raises(ValueError):
         compute_session_snapshot(today, prev_close=0.0)

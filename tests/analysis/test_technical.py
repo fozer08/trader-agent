@@ -18,7 +18,6 @@ def _bar(i: int, close: float, tf: TimeFrame = TimeFrame.D1, volume: float | Non
         low=close - 1,
         close=close,
         volume=volume,
-        is_closed=True,
     )
 
 
@@ -40,7 +39,7 @@ def test_compute_raises_on_mixed_symbols():
         datetime=datetime(2026, 2, 1, tzinfo=timezone.utc),
         timeframe=TimeFrame.D1,
         open=100, high=101, low=99, close=100,
-        volume=1000, is_closed=True,
+        volume=1000,
     )]
     with pytest.raises(ValueError, match="same symbol"):
         compute(mixed)
@@ -114,7 +113,6 @@ def _intraday_bars(n: int, tf: TimeFrame) -> list[Bar]:
             low=99 + i * 0.1,
             close=100 + i * 0.1,
             volume=1000.0,
-            is_closed=True,
         )
         for i in range(n)
     ]

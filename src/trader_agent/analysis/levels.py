@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..market.types import Bar
+from ..market.types import Bar, IntradaySnapshot
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class SessionSnapshot:
     open: float
     high: float
     low: float
-    close: float          # Şu anki fiyat
+    close: float           # Şu anki fiyat
     volume: float | None
     change_pct: float      # (close − prev_close) / prev_close × 100
     gap_pct: float         # (open − prev_close) / prev_close × 100
@@ -67,6 +67,14 @@ def compute_levels(bars: list[Bar]) -> PriceLevels:
     if len(bars) < 2:
         raise ValueError("At least 2 bars are required.")
 
+    symbol = bars[0].symbol
+    if any(b.symbol != symbol for b in bars):
+        raise ValueError("All bars must belong to the same symbol.")
+
+    timeframe = bars[0].timeframe
+    if any(b.timeframe is not timeframe for b in bars):
+        raise ValueError("All bars must have the same timeframe.")
+
     ref = bars[-1]
     h, l, c = ref.high, ref.low, ref.close
 
@@ -99,7 +107,7 @@ def _pivot_levels(high: float, low: float, close: float) -> PivotLevels:
 def _candle_pattern(prev: Bar, curr: Bar) -> CandlePattern | None:
     """curr barında bilinen mum formasyonlarından birini tespit eder.
 
-    Öncelik sırası: doji → hammer → shooting_star → engulfing.
+    Öncelik sırası: engulfing → hammer → shooting_star → doji.
     Hiçbiri eşleşmezse None döner.
     """
     total = curr.high - curr.low
@@ -110,14 +118,6 @@ def _candle_pattern(prev: Bar, curr: Bar) -> CandlePattern | None:
     upper_shadow = curr.high - max(curr.open, curr.close)
     lower_shadow = min(curr.open, curr.close) - curr.low
     bullish = curr.close > curr.open
-
-    # Hammer: alt gölge range'in %60'ından fazla, üst gölge %10'dan az
-    if lower_shadow / total >= 0.6 and upper_shadow / total <= 0.1:
-        return CandlePattern(name="hammer", bullish=True)
-
-    # Shooting Star: üst gölge range'in %60'ından fazla, alt gölge %10'dan az
-    if upper_shadow / total >= 0.6 and lower_shadow / total <= 0.1:
-        return CandlePattern(name="shooting_star", bullish=False)
 
     # Engulfing: mevcut gövde önceki gövdeyi tamamen yutuyor
     prev_body_top = max(prev.open, prev.close)
@@ -131,6 +131,14 @@ def _candle_pattern(prev: Bar, curr: Bar) -> CandlePattern | None:
         if not bullish and prev.close > prev.open:
             return CandlePattern(name="bearish_engulfing", bullish=False)
 
+    # Hammer: alt gölge range'in %60'ından fazla, üst gölge %10'dan az
+    if lower_shadow / total >= 0.6 and upper_shadow / total <= 0.1:
+        return CandlePattern(name="hammer", bullish=True)
+
+    # Shooting Star: üst gölge range'in %60'ından fazla, alt gölge %10'dan az
+    if upper_shadow / total >= 0.6 and lower_shadow / total <= 0.1:
+        return CandlePattern(name="shooting_star", bullish=False)
+
     # Doji: hammer/shooting_star elendikten sonra, gövde range'in %5'inden küçük
     if body / total < 0.05:
         return CandlePattern(name="doji", bullish=bullish)
@@ -138,7 +146,7 @@ def _candle_pattern(prev: Bar, curr: Bar) -> CandlePattern | None:
     return None
 
 
-def compute_session_snapshot(today: Bar, prev_close: float) -> SessionSnapshot:
+def compute_session_snapshot(today: IntradaySnapshot, prev_close: float) -> SessionSnapshot:
     """Bugünkü canlı barı dün kapanışıyla ilişkilendirerek bağlam üretir.
 
     Yalnızca seans içinde çağrılmalıdır; ``today`` bar'ı ``get_today()``
