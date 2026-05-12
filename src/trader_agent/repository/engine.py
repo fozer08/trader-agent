@@ -20,7 +20,7 @@ def create_session_factory(engine: Engine) -> Callable[[], Session]:
 
 
 def init_schema(engine: Engine) -> None:
-    """ORM tablolarını yaratır. Migration yok — schema değişirse DB dosyasını sil."""
-    from . import portfolio, recommendations  # noqa: F401
+    """ORM tablolarını yaratır. TODO: Migration yapılacak."""
+    from . import portfolio, recommendations
 
     Base.metadata.create_all(engine)
