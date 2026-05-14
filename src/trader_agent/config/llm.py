@@ -22,11 +22,12 @@ class LLMConfig(BaseConfig):
     api_key: str = Field(default="", exclude=True)
     light_model: str = ""
     heavy_model: str = ""
-    max_tokens: int = 4096
-    use_prompt_caching: bool = True
+    max_output_tokens: int = 4096
     use_extended_thinking: bool = True
     streaming: bool = True
-    max_conversation_history: int = 20
+    history_trim_minutes: int = 90
+    keep_history_after_pause_minutes: int = 5
+    max_history_tokens: int = 50_000
 
     def model_post_init(self, __context):
         if not self.api_key:

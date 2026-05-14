@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Callable, Literal
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from ._helpers import normalize_symbol, utc_now, validate_price
 from .base import Base
 
 Decision = Literal["BUY", "SELL"]
@@ -56,15 +57,15 @@ class RecommendationRepository:
         target: float | None = None,
         rationale: str | None = None,
     ) -> Recommendation:
-        symbol = _normalize_symbol(symbol)
+        symbol = normalize_symbol(symbol)
         if decision not in ("BUY", "SELL"):
             raise ValueError("decision must be 'BUY' or 'SELL'.")
-        _validate_price(entry, "entry")
-        _validate_price(stop, "stop")
+        validate_price(entry, "entry")
+        validate_price(stop, "stop")
         if target is not None:
-            _validate_price(target, "target")
+            validate_price(target, "target")
 
-        now = _utc_now()
+        now = utc_now()
         with self._session_factory() as session:
             session.execute(delete(RecommendationORM).where(RecommendationORM.created_at < now - _RETENTION))
             row = RecommendationORM(
@@ -82,11 +83,11 @@ class RecommendationRepository:
 
     def list(self, symbol: str | None = None) -> list[Recommendation]:
         """Son 10 günün önerilerini en yeniden eskiye döner; symbol verilirse filtrelenir."""
-        cutoff = _utc_now() - _RETENTION
+        cutoff = utc_now() - _RETENTION
         with self._session_factory() as session:
             stmt = select(RecommendationORM).where(RecommendationORM.created_at >= cutoff)
             if symbol is not None:
-                stmt = stmt.where(RecommendationORM.symbol == _normalize_symbol(symbol))
+                stmt = stmt.where(RecommendationORM.symbol == normalize_symbol(symbol))
             stmt = stmt.order_by(RecommendationORM.created_at.desc())
             rows = session.execute(stmt).scalars().all()
             return [_to_recommendation(r) for r in rows]
@@ -105,19 +106,3 @@ def _to_recommendation(row: RecommendationORM) -> Recommendation:
         rationale=row.rationale,
         created_at=row.created_at,
     )
-
-
-def _normalize_symbol(symbol: str) -> str:
-    normalized = symbol.strip().upper()
-    if not normalized:
-        raise ValueError("symbol cannot be empty.")
-    return normalized
-
-
-def _validate_price(value: float, field: str) -> None:
-    if value <= 0:
-        raise ValueError(f"{field} must be positive.")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)

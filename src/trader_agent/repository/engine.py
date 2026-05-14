@@ -20,7 +20,7 @@ def create_session_factory(engine: Engine) -> Callable[[], Session]:
 
 
 def init_schema(engine: Engine) -> None:
-    """ORM tablolarını yaratır. TODO: Migration yapılacak."""
+    """ORM tablolarını yaratır."""
     from . import portfolio, recommendations
 
     Base.metadata.create_all(engine)

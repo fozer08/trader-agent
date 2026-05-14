@@ -11,7 +11,7 @@ from ..config.main import MainConfig
 from ..env import load_env
 from ..market.provider import IsYatirimProvider
 from ..repository import (
-    PositionRepository,
+    PortfolioRepository,
     RecommendationRepository,
     create_db_engine,
     create_session_factory,
@@ -35,14 +35,14 @@ class _RunnerFactory:
         cfg: MainConfig,
         watchlist: list[dict],
         provider: IsYatirimProvider,
-        position_repo: PositionRepository,
+        portfolio_repo: PortfolioRepository,
         recommendation_repo: RecommendationRepository,
     ) -> None:
         self._cfg = cfg
         self._watchlist = watchlist
         self._tools = [
             *AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list(),
-            *PortfolioTools(repository=position_repo, provider=provider).as_tool_list(),
+            *PortfolioTools(repository=portfolio_repo, provider=provider).as_tool_list(),
             *RecommendationTools(repository=recommendation_repo).as_tool_list(),
         ]
         self._session = cfg.market.exchanges["bist"].trading_session("equities")
@@ -76,12 +76,12 @@ async def lifespan(app: FastAPI):
     engine = create_db_engine(cfg.database_path())
     init_schema(engine)
     session_factory = create_session_factory(engine)
-    position_repo = PositionRepository(session_factory)
+    portfolio_repo = PortfolioRepository(session_factory)
     recommendation_repo = RecommendationRepository(session_factory)
     async with IsYatirimProvider(
         session=cfg.market.exchanges["bist"].trading_session("equities")
     ) as provider:
-        _runner_factory = _RunnerFactory(cfg, watchlist, provider, position_repo, recommendation_repo)
+        _runner_factory = _RunnerFactory(cfg, watchlist, provider, portfolio_repo, recommendation_repo)
         _sessions = {}
         try:
             yield

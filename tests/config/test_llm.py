@@ -11,22 +11,21 @@ def test_defaults(cfg_dir):
     assert config.provider == "anthropic"
     assert config.light_model == "claude-sonnet-4-6"
     assert config.heavy_model == "claude-opus-4-7"
-    assert config.max_tokens == 4096
-    assert config.use_prompt_caching is True
+    assert config.max_output_tokens == 4096
     assert config.use_extended_thinking is True
     assert config.streaming is True
 
 
 def test_yaml_overrides_defaults(cfg_dir):
-    (cfg_dir / "llm.yaml").write_text(yaml.dump({"max_tokens": 2048}))
+    (cfg_dir / "llm.yaml").write_text(yaml.dump({"max_output_tokens": 2048}))
     config = LLMConfig.load()
-    assert config.max_tokens == 2048
+    assert config.max_output_tokens == 2048
 
 
 def test_update_saves_and_reloads(cfg_dir):
     config = LLMConfig.load()
-    config.update(max_tokens=2048)
-    assert LLMConfig.load().max_tokens == 2048
+    config.update(max_output_tokens=2048)
+    assert LLMConfig.load().max_output_tokens == 2048
 
 
 def test_api_key_from_env(cfg_dir, monkeypatch):

@@ -1,8 +1,9 @@
 provider: anthropic
 light_model: claude-sonnet-4-6
 heavy_model: claude-opus-4-7
-max_conversation_history: 20
-max_tokens: 4096
+history_trim_minutes: 90
+keep_history_after_pause_minutes: 5
+max_history_tokens: 50000
+max_output_tokens: 4096
 streaming: true
 use_extended_thinking: true
-use_prompt_caching: true

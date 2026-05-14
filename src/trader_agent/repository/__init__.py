@@ -1,6 +1,14 @@
 from .base import Base
 from .engine import create_db_engine, create_session_factory, init_schema
-from .portfolio import Position, PositionORM, PositionRepository
+from .portfolio import (
+    ClosedPosition,
+    ClosedPositionORM,
+    PortfolioRepository,
+    Position,
+    PositionORM,
+    PositionTransaction,
+    PositionTransactionORM,
+)
 from .recommendations import Recommendation, RecommendationORM, RecommendationRepository
 
 __all__ = [
@@ -8,9 +16,13 @@ __all__ = [
     "create_db_engine",
     "create_session_factory",
     "init_schema",
+    "ClosedPosition",
+    "ClosedPositionORM",
+    "PortfolioRepository",
     "Position",
     "PositionORM",
-    "PositionRepository",
+    "PositionTransaction",
+    "PositionTransactionORM",
     "Recommendation",
     "RecommendationORM",
     "RecommendationRepository",
