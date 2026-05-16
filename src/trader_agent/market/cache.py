@@ -4,7 +4,7 @@ from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from operator import attrgetter
 
-from .types import Bar, TimeFrame
+from ..types import Bar, TimeFrame
 
 _dt_key = attrgetter("datetime")
 

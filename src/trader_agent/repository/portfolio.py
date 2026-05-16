@@ -90,6 +90,14 @@ class Position:
     realized_pnl: float
     capital_time_days: float
 
+    @property
+    def hold_days(self) -> int:
+        return (utc_now().date() - self.opened_at.date()).days + 1
+
+    @property
+    def avg_capital_deployed(self) -> float:
+        return self.capital_time_days / self.hold_days
+
 
 @dataclass(frozen=True)
 class PositionTransaction:

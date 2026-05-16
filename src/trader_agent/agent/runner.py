@@ -6,24 +6,38 @@ from string import Template
 from typing import Any, AsyncGenerator
 
 import anthropic
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config.llm import LLMConfig
+from ..market.base import TradingSession
 from ..market.helpers import is_weekday
-from ..market.types import TradingSession
 from ..tools.base import Tool
 from ..utils.logging import get_logger
-from .prompts import CONTEXT_PROMPT, FORMAT_PROMPTS, SYSTEM_PROMPT
+from .prompts import CONTEXT_PROMPT, FORMAT_PROMPTS, STATE_PROMPT, SYSTEM_PROMPT
+from .state import AgentState
 
 _log = get_logger(__name__)
+
+_UPDATE_STATE_TOOL = "update_state"
+_RECENT_TURNS_LIMIT = 2
+_MAX_TURN_ITERATIONS = 10  # ana konuşma döngüsü için runaway koruması
+_TOOL_RESULT_TRUNCATE = 2000  # state-gen transcript'inde tool result başına byte sınırı
+
+
+class _UpdateStateArgs(BaseModel):
+    """update_state tool argümanlarını valide eden iç model."""
+
+    state: AgentState
+    summary: str = Field(max_length=2000)
 
 
 class AgentRunner:
     """Claude API ile streaming konuşma döngüsünü yöneten agent çalıştırıcısı.
 
-    Tool use bloklarını yakalar, ilgili handler'ı çalıştırır ve sonucu
-    Claude'a geri göndererek döngüyü tamamlar. ``chat()`` bir async
-    generator döndürür; text chunk'ları ve ``[tool_name]`` bildirimleri
-    karışık olarak yield edilir.
+    İki fazlı turn:
+    1. Ana konuşma — text + analiz/portfolio tool'ları, kullanıcıya stream'lenir.
+    2. State generation — ayrı (cheaper) API call, `update_state` forced tool_choice
+       ile state ve summary'yi günceller. Kullanıcıya yansımaz.
     """
 
     def __init__(
@@ -32,70 +46,64 @@ class AgentRunner:
         watchlist: list[dict],
         session: TradingSession,
         tools: list[Tool],
+        delay_minutes: int | None = None,
         output_format: str = "plain",
     ) -> None:
         self._config = config
         self._watchlist = watchlist
         self._session = session
+        self._delay_minutes = delay_minutes
         self._output_format = output_format
         self._tools = {t.name: t for t in tools}
         self._tool_schemas = _build_tool_schemas(tools)
-        self._history: list[dict] = []
-        self._turn_user_times: list[datetime] = []
-        self._turn_end_indices: list[int] = []
-        self._last_chat_at: datetime | None = None
+        self._state_tool_schema = _update_state_tool_schema()
+        self._state = AgentState()
+        self._summary = ""
+        self._recent_turns: list[list[dict]] = []
         self._client = anthropic.AsyncAnthropic(api_key=config.api_key)
 
     def reset(self) -> None:
-        """Konuşma geçmişini temizler."""
-        self._history.clear()
-        self._turn_user_times.clear()
-        self._turn_end_indices.clear()
-        self._last_chat_at = None
+        """State, summary ve recent turn'leri temizler."""
+        self._state = AgentState()
+        self._summary = ""
+        self._recent_turns.clear()
+
+    def memory_dump(self) -> dict:
+        """Debug için: state + summary + recent turn'lerin tam içeriği."""
+        return {
+            "state": self._state.model_dump(mode="json"),
+            "summary": self._summary,
+            "recent_turns": self._recent_turns,
+        }
 
     async def chat(self, user_input: str) -> AsyncGenerator[str, None]:
         """Kullanıcı mesajına karşılık text ve tool bildirimi chunk'ları üretir.
 
-        Yields:
-            str: Claude'dan gelen text delta'ları veya ``\\x00TOOL:name\\x00``
-                 formatında tool çağrı bildirimleri.
+        Phase 1 (stream'lenir): text yanıt + analiz/portfolio tool döngüsü.
+        Phase 2 (silent): state-gen API call, hafıza güncellenir.
         """
-        now = self._now()
-        if self._should_reset(now):
-            self._trim_at_latest_gap()
-        self._last_chat_at = now
+        framed_input = f"{self._build_context_prompt()}\n\n{user_input}"
+        turn_messages: list[dict] = [{"role": "user", "content": framed_input}]
+        iterations = 0
 
-        # Dinamik bağlam (saat, seans) user mesajına gömülür; system statik
-        # kalır → 1h cache prefix'i dakika değişiminden bozulmaz. Eski turlar
-        # history'de donmuş timestamp'leriyle kalır → 5m prefix de stabil.
-        context_prompt = self._build_context_prompt()
-        framed_input = f"{context_prompt}\n\n{user_input}" if context_prompt else user_input
-        self._history.append({"role": "user", "content": framed_input})
-        self._trim_history()
-        user_idx = len(self._history) - 1
+        while iterations < _MAX_TURN_ITERATIONS:
+            iterations += 1
+            params = self._main_message_params(turn_messages)
 
-        while True:
-            async with self._client.messages.stream(
-                **self._message_params(self._config.heavy_model),
-            ) as stream:
+            async with self._client.messages.stream(**params) as stream:
                 async for event in stream:
-                    if (
-                        event.type == "content_block_delta"
-                        and hasattr(event.delta, "text")
-                    ):
+                    if event.type == "content_block_delta" and hasattr(event.delta, "text"):
                         yield event.delta.text
-
                 final = await stream.get_final_message()
 
-            _log_usage(final)
+            _log_usage(final, label="main")
 
-            assistant_content = []
+            assistant_content: list[dict] = []
             tool_use_blocks = []
             for block in final.content:
                 if block.type == "text":
                     assistant_content.append({"type": "text", "text": block.text})
                 elif block.type == "tool_use":
-                    yield f"\x00TOOL:{block.name}\x00"
                     assistant_content.append(
                         {
                             "type": "tool_use",
@@ -105,14 +113,27 @@ class AgentRunner:
                         }
                     )
                     tool_use_blocks.append(block)
+                elif block.type == "thinking":
+                    assistant_content.append(
+                        {
+                            "type": "thinking",
+                            "thinking": block.thinking,
+                            "signature": block.signature,
+                        }
+                    )
+                elif block.type == "redacted_thinking":
+                    assistant_content.append(
+                        {"type": "redacted_thinking", "data": block.data}
+                    )
 
-            self._history.append({"role": "assistant", "content": assistant_content})
+            turn_messages.append({"role": "assistant", "content": assistant_content})
 
-            if final.stop_reason != "tool_use":
-                break
+            if not tool_use_blocks:
+                break  # LLM cevabını verdi, ana faz tamam
 
             tool_results = []
             for block in tool_use_blocks:
+                yield f"\x00TOOL:{block.name}\x00"
                 tool = self._tools.get(block.name)
                 if tool is None:
                     result = {"error": f"Unknown tool: {block.name}"}
@@ -129,25 +150,76 @@ class AgentRunner:
                     }
                 )
 
-            self._history.append({"role": "user", "content": tool_results})
+            turn_messages.append({"role": "user", "content": tool_results})
+        else:
+            _log.error(
+                "chat turn %d iteration üst sınırına ulaştı; turn kapatılıyor",
+                _MAX_TURN_ITERATIONS,
+            )
+            yield "\n\n[Sistem: turn iteration üst sınırı aşıldı.]"
 
-        self._prune_ephemeral_tools(user_idx)
-        self._turn_user_times.append(now)
-        self._turn_end_indices.append(len(self._history))
+        # Phase 2: state generation (silent, errors logged but tolerated)
+        await self._generate_state(turn_messages)
+        self._push_recent_turn(turn_messages)
 
-    # ---- private -------------------------------------------------------------
+    # ---- state generation -----------------------------------------------
 
-    def _should_reset(self, now: datetime) -> bool:
-        threshold = self._config.history_trim_minutes
-        if not threshold or self._last_chat_at is None:
-            return False
-        return (now - self._last_chat_at).total_seconds() >= threshold * 60
+    async def _generate_state(self, turn_messages: list[dict]) -> None:
+        """Ayrı bir API çağrısı ile state ve summary'yi günceller."""
+        prev_state_json = (
+            self._state.model_dump_json(indent=2)
+            if not self._state.is_empty()
+            else "(boş)"
+        )
+        prev_summary = self._summary or "(boş)"
+        transcript = _format_turn_transcript(turn_messages)
+        user_msg = (
+            f"## Mevcut State\n{prev_state_json}\n\n"
+            f"## Geçmiş Özet\n{prev_summary}\n\n"
+            f"## Son Turn Konuşması\n{transcript}\n\n"
+            "---\nYukarıdaki konuşmaya göre state'i güncelle ve summary yaz. "
+            "`update_state` tool'unu çağır."
+        )
 
-    def _message_params(self, model: str) -> dict[str, Any]:
+        try:
+            response = await self._client.messages.create(
+                model=self._config.light_model,
+                system=STATE_PROMPT,
+                messages=[{"role": "user", "content": user_msg}],
+                tools=[self._state_tool_schema],
+                tool_choice={"type": "tool", "name": _UPDATE_STATE_TOOL},
+                max_tokens=8192,
+            )
+        except Exception as exc:
+            _log.warning("state generation API call failed: %s", exc, exc_info=True)
+            return
+
+        _log_usage(response, label="state")
+
+        for block in response.content:
+            if block.type == "tool_use" and block.name == _UPDATE_STATE_TOOL:
+                self._handle_state_update(block.input)
+                return
+
+        _log.warning("state generation: response içinde update_state tool_use yok")
+
+    def _handle_state_update(self, args: dict) -> None:
+        """update_state args'ını valide eder ve state'i günceller."""
+        try:
+            parsed = _UpdateStateArgs.model_validate(args)
+        except ValidationError as exc:
+            _log.warning("state-gen validation failed: %s", exc)
+            return
+        self._state = parsed.state
+        self._summary = parsed.summary
+
+    # ---- main message construction --------------------------------------
+
+    def _main_message_params(self, turn_messages: list[dict]) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "model": model,
+            "model": self._config.agent_model,
             "system": self._build_system_param(),
-            "messages": self._messages_with_cache_marker(),
+            "messages": self._build_messages(turn_messages),
             "tools": self._tool_schemas,
             "max_tokens": self._config.max_output_tokens,
         }
@@ -155,32 +227,42 @@ class AgentRunner:
             params["thinking"] = {"type": "adaptive"}
         return params
 
-    def _messages_with_cache_marker(self) -> list[dict]:
-        """Son mesajın son içerik bloğuna 5m cache_control işaretler. Her
-        request'te garanti bir 5m breakpoint olur; bir sonraki request
-        (aynı session içinde) bu prefix'i cache'den okur."""
-        if not self._history:
-            return self._history
-        last = self._history[-1]
-        content = last["content"]
-        marker = {"type": "ephemeral", "ttl": "5m"}
-        if isinstance(content, str):
-            new_content = [{"type": "text", "text": content, "cache_control": marker}]
-        elif isinstance(content, list) and content:
-            new_content = list(content)
-            new_content[-1] = {**new_content[-1], "cache_control": marker}
-        else:
-            return self._history
-        return [*self._history[:-1], {**last, "content": new_content}]
+    def _build_messages(self, turn_messages: list[dict]) -> list[dict]:
+        msgs: list[dict] = []
+        for turn in self._recent_turns:
+            msgs.extend(turn)
+        msgs.extend(turn_messages)
+        return msgs
 
     def _build_system_param(self) -> list[dict[str, Any]]:
-        return [
+        blocks: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": self._build_static_prompt(),
                 "cache_control": {"type": "ephemeral", "ttl": "1h"},
-            },
+            }
         ]
+        memory = self._serialize_memory()
+        if memory:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": memory,
+                    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                }
+            )
+        return blocks
+
+    def _serialize_memory(self) -> str:
+        """State + summary'yi system prompt'a injekte edilecek metne çevirir."""
+        if self._state.is_empty() and not self._summary:
+            return ""
+        parts = []
+        if not self._state.is_empty():
+            parts.append("## Hafıza — State\n" + self._state.model_dump_json(indent=2))
+        if self._summary:
+            parts.append("## Hafıza — Geçmiş Özet\n" + self._summary)
+        return "\n\n".join(parts)
 
     def _build_static_prompt(self) -> str:
         watchlist_lines = "\n".join(
@@ -213,6 +295,12 @@ class AgentRunner:
             session_end = datetime.combine(now.date(), self._session.end, tzinfo=now.tzinfo)
             session_timing = f"Seans Kapanışına Kalan: {_format_remaining(session_end - now)}"
 
+        feed_delay = (
+            f"Veri Gecikmesi: {self._delay_minutes} dakika"
+            if self._delay_minutes and self._delay_minutes >= 5
+            else ""
+        )
+
         day_names = {0: "Pazartesi", 1: "Salı", 2: "Çarşamba", 3: "Perşembe", 4: "Cuma", 5: "Cumartesi", 6: "Pazar"}
         day_name = day_names[now.weekday()]
 
@@ -224,44 +312,15 @@ class AgentRunner:
             session_status=session_status,
             session_phase=session_phase,
             session_timing=session_timing,
+            feed_delay=feed_delay,
         )
 
-    def _prune_ephemeral_tools(self, user_idx: int) -> None:
-        """keep_in_history=False olan tool'ların tool_use ve karşılık gelen
-        tool_result bloklarını history'den temizler → turlar arası cache
-        prefix stabil kalır."""
-        prune_ids: set[str] = set()
-        for msg in self._history[user_idx:]:
-            if msg["role"] != "assistant" or not isinstance(msg["content"], list):
-                continue
-            for block in msg["content"]:
-                if block.get("type") != "tool_use":
-                    continue
-                tool = self._tools.get(block["name"])
-                if tool is None or not tool.keep_in_history:
-                    prune_ids.add(block["id"])
+    # ---- recent turns ----------------------------------------------------
 
-        if not prune_ids:
-            return
-
-        def is_pruned(block: dict) -> bool:
-            if block.get("type") == "tool_use":
-                return block.get("id") in prune_ids
-            if block.get("type") == "tool_result":
-                return block.get("tool_use_id") in prune_ids
-            return False
-
-        new_history = list(self._history[: user_idx + 1])
-        for msg in self._history[user_idx + 1 :]:
-            content = msg["content"]
-            if not isinstance(content, list):
-                new_history.append(msg)
-                continue
-            filtered = [b for b in content if not is_pruned(b)]
-            if filtered:
-                new_history.append({**msg, "content": filtered})
-
-        self._history = new_history
+    def _push_recent_turn(self, turn_messages: list[dict]) -> None:
+        self._recent_turns.append(turn_messages)
+        if len(self._recent_turns) > _RECENT_TURNS_LIMIT:
+            self._recent_turns = self._recent_turns[-_RECENT_TURNS_LIMIT:]
 
     def _now(self) -> datetime:
         return datetime.now(self._session.timezone)
@@ -274,65 +333,45 @@ class AgentRunner:
         )
         return FORMAT_PROMPTS[format_name].strip()
 
-    def _trim_at_latest_gap(self) -> None:
-        """Reset trigger çaldığında: history'deki en son ``keep_history_after_pause_minutes``
-        üstü iç gap'in öncesini at → son tutarlı parça context olarak kalır.
-        İç gap yoksa tüm history atılır."""
-        gap_min = timedelta(minutes=self._config.keep_history_after_pause_minutes)
-        times = self._turn_user_times
-        ends = self._turn_end_indices
 
-        cut_after: int | None = None
-        for i in range(len(times) - 1, 0, -1):
-            if (times[i] - times[i - 1]) >= gap_min:
-                cut_after = i - 1
-                break
+# ---- helpers ----------------------------------------------------------------
 
-        if cut_after is None:
-            self._drop_turns(len(times))
-            return
-        self._drop_turns(cut_after + 1)
+def _format_turn_transcript(turn_messages: list[dict]) -> str:
+    """turn_messages'ı state-gen LLM için okunabilir transcript'e çevirir.
 
-    def _trim_history(self) -> None:
-        """Backstop: token bütçesini aşarsa en eski turun TÜM mesajlarını at
-        (orphan tool_use/tool_result kalmaması için tek seferde tur bütünü).
-        Pruning + gap-trim history'i küçük tuttuğu için pratikte tetiklenmez."""
-        max_tokens = self._config.max_history_tokens
-        if max_tokens <= 0:
-            return
-        while self._turn_end_indices and _estimate_tokens(self._history) > max_tokens:
-            self._drop_turns(1)
-
-    def _drop_turns(self, count: int) -> None:
-        """En eski ``count`` turu (mesajları ve timestamp'leri) atar."""
-        if count <= 0 or count > len(self._turn_end_indices):
-            count = len(self._turn_end_indices)
-        if count == 0:
-            return
-        drop_count = self._turn_end_indices[count - 1]
-        self._history = self._history[drop_count:]
-        self._turn_user_times = self._turn_user_times[count:]
-        self._turn_end_indices = [idx - drop_count for idx in self._turn_end_indices[count:]]
+    Tool result'lar büyük olabilir (örn. scan 30 sembol) — başına ``_TOOL_RESULT_TRUNCATE``
+    byte sınırı koyuluyor. State çıkarımı için tipik olarak özet bilgi yeter.
+    """
+    parts = []
+    for msg in turn_messages:
+        role = msg.get("role", "?")
+        content = msg.get("content")
+        if isinstance(content, str):
+            parts.append(f"## {role.upper()}\n{content}")
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("type")
+            if t == "text":
+                parts.append(f"## {role.upper()} (text)\n{block.get('text', '')}")
+            elif t == "tool_use":
+                input_str = json.dumps(block.get("input", {}), ensure_ascii=False)
+                parts.append(
+                    f"## {role.upper()} (tool_use: {block.get('name')})\nInput: {input_str}"
+                )
+            elif t == "tool_result":
+                raw = block.get("content", "")
+                if isinstance(raw, str) and len(raw) > _TOOL_RESULT_TRUNCATE:
+                    raw = raw[:_TOOL_RESULT_TRUNCATE] + "... [truncated]"
+                parts.append(f"## TOOL_RESULT\n{raw}")
+    return "\n\n".join(parts)
 
 
 def _render_prompt(template: str, **values: str) -> str:
     return Template(template.strip()).safe_substitute(values)
-
-
-def _estimate_tokens(messages: list[dict]) -> int:
-    """Kaba char/4 tahmini; sadece backstop trim eşiği için kullanılır."""
-    total = 0
-    for msg in messages:
-        content = msg.get("content")
-        if isinstance(content, str):
-            total += len(content) // 4
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    text = block.get("text") or block.get("content") or ""
-                    if isinstance(text, str):
-                        total += len(text) // 4
-    return total
 
 
 def _build_tool_schemas(tools: list[Tool]) -> list[dict]:
@@ -342,7 +381,32 @@ def _build_tool_schemas(tools: list[Tool]) -> list[dict]:
     return schemas
 
 
-def _log_usage(message: Any) -> None:
+def _update_state_tool_schema() -> dict:
+    """update_state tool şeması; AgentState'in $defs'i input_schema root'una taşınır."""
+    state_schema = AgentState.model_json_schema()
+    defs = state_schema.pop("$defs", {})
+    return {
+        "name": _UPDATE_STATE_TOOL,
+        "description": (
+            "Agent state'inin yeni tam halini ve son turn'ün narrative özetini sun."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "state": state_schema,
+                "summary": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "Son turn'ün narrative özeti (Türkçe, max ~300 kelime).",
+                },
+            },
+            "required": ["state", "summary"],
+            "$defs": defs,
+        },
+    }
+
+
+def _log_usage(message: Any, label: str = "") -> None:
     usage = getattr(message, "usage", None)
     if usage is None:
         return
@@ -350,7 +414,8 @@ def _log_usage(message: Any) -> None:
     write_5m = getattr(cc, "ephemeral_5m_input_tokens", 0) if cc else 0
     write_1h = getattr(cc, "ephemeral_1h_input_tokens", 0) if cc else 0
     _log.info(
-        "usage input=%s output=%s cache_read=%s cache_write=%s (5m=%s 1h=%s)",
+        "usage[%s] input=%s output=%s cache_read=%s cache_write=%s (5m=%s 1h=%s)",
+        label,
         getattr(usage, "input_tokens", 0),
         getattr(usage, "output_tokens", 0),
         getattr(usage, "cache_read_input_tokens", 0),

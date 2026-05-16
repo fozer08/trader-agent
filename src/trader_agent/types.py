@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 from enum import Enum
-from zoneinfo import ZoneInfo
 
 
 class TimeFrame(Enum):
@@ -47,20 +46,3 @@ class IntradaySnapshot:
     low: float
     close: float
     volume: float | None
-
-
-@dataclass(frozen=True)
-class TradingSession:
-    """Bir piyasa seansının başlangıç/bitiş saati ve timezone'u."""
-
-    start: time
-    end: time
-    timezone: ZoneInfo
-
-
-@dataclass(frozen=True)
-class PricePoint:
-    """Tek bir zaman damgasındaki fiyat gözlemi."""
-
-    datetime: datetime
-    price: float

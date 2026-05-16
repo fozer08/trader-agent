@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
 from ..utils.logging import get_logger
+from .base import MarketDataProvider, PricePoint, TradingSession
 from .cache import MarketBarCache
 from .helpers import aggregate_bars, calc_session_bounds, floor_to_timeframe, ohlcv_from_bars
-from .provider_base import MarketDataProvider
 from .rate_limiter import RateLimiter
-from .types import Bar, IntradaySnapshot, PricePoint, TimeFrame, TradingSession
+from ..types import Bar, IntradaySnapshot, TimeFrame
 
 _log = get_logger(__name__)
 
@@ -30,8 +31,8 @@ class IsYatirimProvider(MarketDataProvider):
     user_agent = "Mozilla/5.0"
 
     source_tf = TimeFrame.M1          # API'nin desteklediği en küçük çözünürlük
-    _daily_fetch_days = 365           # Günlük fetch penceresinin uzunluğu (gün)
-    _daily_fetch_padding_days = 30    # Trading day hesabındaki tatil/hafta sonu tamponu
+    _daily_fetch_days = 200           # Günlük fetch penceresinin uzunluğu (gün)
+    _daily_fetch_padding_days = 10    # Trading day hesabındaki tatil/hafta sonu tamponu
 
     intraday_url = (
         "https://www.isyatirim.com.tr/_Layouts/15/"
@@ -359,6 +360,7 @@ class IsYatirimProvider(MarketDataProvider):
     async def _get_json(self, url: str, params: dict, symbol: str) -> dict:
         """Endpoint'ten JSON çeker, bozuk yanıtta açıklayıcı hata fırlatır."""
         await self._rate_limiter.acquire()
+        started = time.monotonic()
         try:
             response = await self.client.get(
                 url,
@@ -372,6 +374,15 @@ class IsYatirimProvider(MarketDataProvider):
         except httpx.HTTPError as exc:
             _log.error("HTTP isteği başarısız [%s]: %s", symbol, exc)
             raise
+
+        _log.debug(
+            "provider [%s] %s params=%s -> %d in %dms",
+            symbol,
+            url.rsplit("/", 1)[-1],
+            params,
+            response.status_code,
+            int((time.monotonic() - started) * 1000),
+        )
 
         if response.status_code == 429:
             _log.warning("Rate limit yanıtı [%s]: HTTP 429", symbol)

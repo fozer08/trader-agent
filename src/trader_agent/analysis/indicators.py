@@ -6,15 +6,15 @@ from datetime import datetime
 import pandas as pd
 import ta
 
-from ..market.types import Bar, TimeFrame
+from ..types import Bar, TimeFrame
 
 
 @dataclass(frozen=True)
-class Profile:
+class IndicatorProfile:
     """Bir timeframe için indikatör parametrelerini tanımlar.
 
-    Her timeframe farklı bir Profile kullanır; PROFILES sözlüğünden seçilir
-    ya da compute() çağrısında açıkça geçilebilir.
+    Her timeframe farklı bir IndicatorProfile kullanır; PROFILES sözlüğünden seçilir
+    ya da compute_indicator() çağrısında açıkça geçilebilir.
     """
     ema_fast: int
     ema_slow: int | None  # None ise hesaplanmaz
@@ -26,8 +26,8 @@ class Profile:
     use_rsi_divergence: bool
 
 
-PROFILES: dict[TimeFrame, Profile] = {
-    TimeFrame.D1: Profile(
+PROFILES: dict[TimeFrame, IndicatorProfile] = {
+    TimeFrame.D1: IndicatorProfile(
         ema_fast=9,
         ema_slow=21,
         rsi_period=14,
@@ -37,7 +37,7 @@ PROFILES: dict[TimeFrame, Profile] = {
         bb_period=20,
         use_rsi_divergence=True,
     ),
-    TimeFrame.M15: Profile(
+    TimeFrame.M15: IndicatorProfile(
         ema_fast=8,
         ema_slow=13,
         rsi_period=9,
@@ -47,7 +47,7 @@ PROFILES: dict[TimeFrame, Profile] = {
         bb_period=20,
         use_rsi_divergence=False,
     ),
-    TimeFrame.M5: Profile(
+    TimeFrame.M5: IndicatorProfile(
         ema_fast=9,
         ema_slow=None,
         rsi_period=14,
@@ -88,7 +88,7 @@ class IndicatorSet:
     symbol: str
     timeframe: TimeFrame
     datetime: datetime
-    profile: Profile
+    profile: IndicatorProfile
 
     ema_fast: float | None
     ema_slow: float | None
@@ -102,10 +102,10 @@ class IndicatorSet:
     bb: BollingerResult | None
 
 
-def compute(bars: list[Bar], profile: Profile | None = None) -> IndicatorSet:
+def compute_indicator(bars: list[Bar], profile: IndicatorProfile | None = None) -> IndicatorSet:
     """Bar listesinden profil tabanlı teknik indikatör seti hesaplar.
 
-    Profile verilmezse bars'ın timeframe'inden otomatik seçilir.
+    IndicatorProfile verilmezse bars'ın timeframe'inden otomatik seçilir.
     Yeterli veri yoksa ilgili alan None döner.
 
     Raises:

@@ -1,8 +1,28 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
-from .types import Bar, IntradaySnapshot, TimeFrame
+from ..types import Bar, IntradaySnapshot, TimeFrame
+
+
+@dataclass(frozen=True)
+class TradingSession:
+    """Bir piyasa seansının başlangıç/bitiş saati ve timezone'u."""
+
+    start: time
+    end: time
+    timezone: ZoneInfo
+
+
+@dataclass(frozen=True)
+class PricePoint:
+    """Tek bir zaman damgasındaki fiyat gözlemi."""
+
+    datetime: datetime
+    price: float
 
 
 class MarketDataProvider(ABC):

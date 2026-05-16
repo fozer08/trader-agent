@@ -1,9 +1,5 @@
-provider: anthropic
+agent_model: claude-sonnet-4-6
 light_model: claude-sonnet-4-6
-heavy_model: claude-opus-4-7
-history_trim_minutes: 90
-keep_history_after_pause_minutes: 5
-max_history_tokens: 50000
-max_output_tokens: 4096
-streaming: true
-use_extended_thinking: true
+max_output_tokens: 8192
+provider: anthropic
+use_extended_thinking: false

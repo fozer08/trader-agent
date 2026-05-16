@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 
-from ..analysis import compute, compute_levels
-from ..analysis.levels import PriceLevels
-from ..analysis.technical import IndicatorSet
-from ..market.provider_base import MarketDataProvider
-from ..market.types import Bar, IntradaySnapshot, TimeFrame
+from ..analysis import (
+    IndicatorSet,
+    PriceLevels,
+    compute_indicator,
+    compute_levels,
+    compute_pulse,
+)
+from ..market.base import MarketDataProvider
+from ..types import TimeFrame
 from ..utils.logging import get_logger
 from .base import Tool
 
@@ -15,10 +19,10 @@ _log = get_logger(__name__)
 
 
 class AnalysisTools:
-    """Provider ve watchlist üzerinden Claude'a sunulan analiz araçları.
+    """Provider ve watchlist üzerinden LLM'e sunulan analiz araçları.
 
     Tüm araçlar hataları exception fırlatmak yerine ``{"error": "..."}``
-    dict'i olarak döner; Claude bunu kullanıcıya doğal dille aktarır.
+    dict'i olarak döner; LLM bunu kullanıcıya doğal dille aktarır.
     """
 
     def __init__(
@@ -28,46 +32,49 @@ class AnalysisTools:
     ) -> None:
         self._provider = provider
         self._watchlist = watchlist
-        self._delay_minutes = getattr(provider, "delay_minutes", None)
+        self._name_map = {e["symbol"]: e.get("name", e["symbol"]) for e in watchlist}
 
     # ---- Tool handlers -------------------------------------------------------
 
-    async def scan(self, symbols: list[str] | None = None) -> list[dict]:
-        """D1 özet tarama — hızlı piyasa görünümü."""
-        if symbols is not None:
-            watchlist_map = {e["symbol"]: e for e in self._watchlist}
-            entries = [watchlist_map.get(s, {"symbol": s}) for s in symbols]
-        else:
-            entries = self._watchlist
-
+    async def scan(self) -> list[dict]:
+        """Tüm watchlist için kısa özet tarama."""
         results = await asyncio.gather(
-            *[self._scan_one(entry) for entry in entries],
+            *[self._scan_one(e["symbol"]) for e in self._watchlist],
             return_exceptions=True,
         )
         return [r for r in results if isinstance(r, dict)]
 
-    async def get_technicals(self, symbols: list[str]) -> list[dict]:
-        """D1 teknik analiz; seans açıksa session ve M15/M5 eklenir."""
-        watchlist_map = {e["symbol"]: e.get("name", e["symbol"]) for e in self._watchlist}
+    async def get_daily_indicators(self, symbols: list[str]) -> list[dict]:
+        """Belirli semboller için D1 teknik indikatörler."""
         results = await asyncio.gather(
-            *[self._technicals_one(symbol, watchlist_map.get(symbol, symbol)) for symbol in symbols],
+            *[self._daily_indicators_one(s) for s in symbols],
             return_exceptions=True,
         )
         return [r for r in results if isinstance(r, dict)]
 
-    async def get_levels(self, symbol: str) -> dict:
-        """Fiyat yapısı: pivot, PDH/PDL/PDC, haftalık aralık, mum formasyonu."""
-        try:
-            bars = await self._provider.get_daily(symbol, period=30)
-            if len(bars) < 2:
-                return self._with_delay({"symbol": symbol, "error": "insufficient data"})
-            lvl = compute_levels(bars)
-            return self._with_delay(_drop_none({
-                "symbol": symbol,
-                "levels": _levels_to_dict(lvl),
-            }))
-        except Exception as exc:
-            return self._with_delay({"symbol": symbol, "error": str(exc)})
+    async def get_intraday_indicators(self, symbols: list[str]) -> list[dict]:
+        """Belirli semboller için M15 + M5 intraday teknik indikatörler."""
+        results = await asyncio.gather(
+            *[self._intraday_indicators_one(s) for s in symbols],
+            return_exceptions=True,
+        )
+        return [r for r in results if isinstance(r, dict)]
+
+    async def get_pulse(self, symbols: list[str]) -> list[dict]:
+        """Belirli semboller için canlı seans nabzı; seans kapalıysa error döner."""
+        results = await asyncio.gather(
+            *[self._pulse_one(s) for s in symbols],
+            return_exceptions=True,
+        )
+        return [r for r in results if isinstance(r, dict)]
+
+    async def get_levels(self, symbols: list[str]) -> list[dict]:
+        """Belirli semboller için pivot, PDH/PDL/PDC, haftalık aralık, mum formasyonu."""
+        results = await asyncio.gather(
+            *[self._levels_one(s) for s in symbols],
+            return_exceptions=True,
+        )
+        return [r for r in results if isinstance(r, dict)]
 
     def as_tool_list(self) -> list[Tool]:
         """Claude agent'ına register edilecek tool listesini döndürür."""
@@ -75,38 +82,25 @@ class AnalysisTools:
             Tool(
                 name="scan",
                 description=(
-                    "Birden fazla hisseyi hızlıca tarar; geniş piyasa görünümü ve fırsat arama için kullan. "
-                    "symbols verilmezse tüm takip listesi taranır. Her hisse için: "
-                    "d1 (önceki kapanış bazlı) — EMA trend/hizalama, RSI, ATR, göreceli hacim, mum formasyonu; "
-                    "session (seans açıksa) — canlı fiyat, % değişim, gap, gün içi yüksek/düşük/aralık, "
-                    "canlı fiyatın D1 EMA'sına göre konumu; seans kapalıysa session alanı yer almaz. "
-                    "İndikatör detayı, intraday momentum (M15/M5) veya giriş/stop/hedef hesaplaması gerekiyorsa get_technicals kullan."
+                    "Tüm watchlist için curated kısa özet tarama; geniş piyasa görünümü ve fırsat arama için kullan. "
+                    "Her hisse için: daily (son seans bazlı) — EMA trend/hizalama, RSI, ATR, göreceli hacim, mum formasyonu; "
+                    "pulse (seans açıksa) — canlı fiyat, % değişim (gap dahil/hariç), gap, gün içi yüksek/düşük/aralık, "
+                    "göreceli hacim, EMA'ya konum. "
+                    "Belirli sembol(ler) için daha derinlemesine bilgi gerekiyorsa get_daily_indicators / get_intraday_indicators / get_pulse / get_levels kullan."
                 ),
                 input_schema={
                     "type": "object",
-                    "properties": {
-                        "symbols": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Taranacak BIST ticker sembolleri. "
-                                "Belirtilmezse tüm takip listesi taranır."
-                            ),
-                        },
-                    },
+                    "properties": {},
                     "required": [],
                 },
                 handler=self.scan,
             ),
             Tool(
-                name="get_technicals",
+                name="get_daily_indicators",
                 description=(
-                    "Belirli hisseler için kapsamlı teknik analiz; detaylı karar ve seviye hesaplaması için kullan. "
-                    "Geniş tarama için scan tercih edilmeli. "
-                    "d1.indicators: EMA trend/hizalama, RSI (+ bullish/bearish uyumsuzluk), MACD histogram, ATR, Bollinger width/pct_b. "
-                    "d1.levels: pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, haftalık aralık, mum formasyonu, göreceli hacim. "
-                    "session (seans açıksa): canlı fiyat, % değişim, gap, gün içi aralık/konum, price_vs_ema. "
-                    "m15/m5 (seans açıksa): intraday EMA, RSI, ATR, Bollinger; seans kapalıysa bu alanlar yer almaz."
+                    "Belirli semboller için D1 (günlük) teknik indikatörler: EMA trend/hizalama, "
+                    "RSI + bullish/bearish uyumsuzluk, MACD histogram, ATR, Bollinger width/pct_b. "
+                    "Yapısal trend ve karar için kullan; intraday momentum için get_intraday_indicators."
                 ),
                 input_schema={
                     "type": "object",
@@ -114,29 +108,75 @@ class AnalysisTools:
                         "symbols": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Analiz edilecek BIST ticker sembolleri listesi.",
+                            "minItems": 1,
+                            "description": "BIST ticker sembolleri listesi.",
                         },
                     },
                     "required": ["symbols"],
                 },
-                handler=self.get_technicals,
+                handler=self.get_daily_indicators,
             ),
             Tool(
-                name="get_levels",
+                name="get_intraday_indicators",
                 description=(
-                    "Tek bir hisse için yalnızca fiyat yapısını döner; sadece destek/direnç veya stop seviyesi sorulduğunda kullan. "
-                    "Döner: pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, haftalık aralık, mum formasyonu, göreceli hacim. "
-                    "EMA, RSI gibi indikatörler de gerekiyorsa get_technicals kullan (levels onun içinde de döner)."
+                    "Belirli semboller için M15 + M5 intraday teknik indikatörler. "
+                    "Her hisse için iki timeframe paralel döner — EMA, RSI, ATR, Bollinger. "
+                    "Seans açıkken intraday momentum/giriş timing'i için kullan; yapısal trend için get_daily_indicators."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "symbol": {
-                            "type": "string",
-                            "description": "BIST ticker sembolü, örn: THYAO, AKBNK",
+                        "symbols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "BIST ticker sembolleri listesi.",
                         },
                     },
-                    "required": ["symbol"],
+                    "required": ["symbols"],
+                },
+                handler=self.get_intraday_indicators,
+            ),
+            Tool(
+                name="get_pulse",
+                description=(
+                    "Belirli semboller için canlı seans nabzı: anlık fiyat, change_pct (gap dahil), "
+                    "open_change_pct (gap hariç salt intraday), gap, gün içi aralık/konum, "
+                    "göreceli hacim, price_vs_ema. "
+                    "Seans kapalıyken sembol için error döner — yalnızca seans açıkken anlamlı."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "BIST ticker sembolleri listesi.",
+                        },
+                    },
+                    "required": ["symbols"],
+                },
+                handler=self.get_pulse,
+            ),
+            Tool(
+                name="get_levels",
+                description=(
+                    "Belirli semboller için fiyat yapısı: pivot (PP/R1/R2/S1/S2), PDH/PDL/PDC, "
+                    "haftalık aralık, mum formasyonu, göreceli hacim. "
+                    "Destek/direnç, stop seviyesi veya hedef hesabı için kullan."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "BIST ticker sembolleri listesi.",
+                        },
+                    },
+                    "required": ["symbols"],
                 },
                 handler=self.get_levels,
             ),
@@ -144,153 +184,124 @@ class AnalysisTools:
 
     # ---- private -------------------------------------------------------------
 
-    async def _scan_one(self, entry: dict) -> dict:
-        symbol = entry["symbol"]
+    async def _scan_one(self, symbol: str) -> dict:
         try:
             bars, today_bar = await asyncio.gather(
                 self._provider.get_daily(symbol, period=30),
                 self._provider.get_today(symbol),
             )
             if len(bars) < 2:
-                return self._with_delay({"symbol": symbol, "error": "insufficient data"})
+                return _error(symbol, "insufficient data")
 
-            ind = compute(bars)
+            ind = compute_indicator(bars)
             lvl = compute_levels(bars)
 
-            return self._with_delay(_drop_none({
+            result: dict = {
                 "symbol": symbol,
-                "name": entry.get("name", symbol),
-                "d1": _drop_none({
-                    "close": bars[-1].close,
+                "name": self._name_map.get(symbol, symbol),
+                "daily": {
+                    "close": lvl.prev_close,
                     "ema_trend": ind.ema_trend,
                     "ema_alignment": ind.ema_alignment,
                     "rsi": ind.rsi,
                     "atr": ind.atr,
                     "relative_volume": lvl.relative_volume,
                     "candle": lvl.candle.name if lvl.candle else None,
-                }),
-                "session": _build_session(today_bar, lvl.prev_close, bars, ind.ema_fast),
-            }))
+                },
+            }
+            result["pulse"] = (
+                dataclasses.asdict(compute_pulse(today_bar, bars, ind.ema_fast))
+                if today_bar is not None
+                else None
+            )
+            return result
         except Exception as exc:
-            return self._with_delay({"symbol": symbol, "error": str(exc)})
+            _log.warning("scan_one failed for %s: %s", symbol, exc, exc_info=True)
+            return _error(symbol, str(exc))
 
-    async def _technicals_one(self, symbol: str, name: str) -> dict:
+    async def _daily_indicators_one(self, symbol: str) -> dict:
         try:
-            bars, today_bar, m15_bars, m5_bars = await asyncio.gather(
-                self._provider.get_daily(symbol, period=100),
-                self._provider.get_today(symbol),
+            bars = await self._provider.get_daily(symbol, period=100)
+            if len(bars) < 2:
+                return _error(symbol, "insufficient data")
+            return {
+                "symbol": symbol,
+                "name": self._name_map.get(symbol, symbol),
+                "indicators": _indicators_to_dict(compute_indicator(bars)),
+            }
+        except Exception as exc:
+            _log.warning("daily_indicators_one failed for %s: %s", symbol, exc, exc_info=True)
+            return _error(symbol, str(exc))
+
+    async def _intraday_indicators_one(self, symbol: str) -> dict:
+        try:
+            m15_bars, m5_bars = await asyncio.gather(
                 self._provider.get_intraday(symbol, TimeFrame.M15),
                 self._provider.get_intraday(symbol, TimeFrame.M5),
             )
         except Exception as exc:
-            return self._with_delay({"symbol": symbol, "error": str(exc)})
-
-        if len(bars) < 2:
-            return self._with_delay({"symbol": symbol, "error": "Insufficient daily data."})
-
-        try:
-            indicators = compute(bars)
-            levels = compute_levels(bars)
-        except Exception as exc:
-            return self._with_delay({"symbol": symbol, "error": str(exc)})
-
-        session_active = bool(m15_bars or m5_bars)
-
-        m15: dict | None = None
-        if len(m15_bars) >= 2:
-            try:
-                m15 = _indicators_to_dict(compute(m15_bars))
-            except Exception as exc:
-                _log.warning("M15 compute failed for %s: %s", symbol, exc)
-
-        m5: dict | None = None
-        if len(m5_bars) >= 2:
-            try:
-                m5 = _indicators_to_dict(compute(m5_bars))
-            except Exception as exc:
-                _log.warning("M5 compute failed for %s: %s", symbol, exc)
+            _log.warning("intraday_indicators_one fetch failed for %s: %s", symbol, exc, exc_info=True)
+            return _error(symbol, str(exc))
 
         result: dict = {
             "symbol": symbol,
-            "name": name,
-            "session_active": session_active,
-            "d1": {
-                "close": bars[-1].close,
-                "indicators": _indicators_to_dict(indicators),
-                "levels": _levels_to_dict(levels),
-            },
-            "session": _build_session(today_bar, levels.prev_close, bars, indicators.ema_fast),
+            "name": self._name_map.get(symbol, symbol),
         }
+        for label, bars in (("m15", m15_bars), ("m5", m5_bars)):
+            if len(bars) < 2:
+                continue
+            try:
+                result[label] = _indicators_to_dict(compute_indicator(bars))
+            except Exception as exc:
+                _log.warning("%s compute failed for %s: %s", label, symbol, exc)
 
-        if session_active:
-            if m15 is not None:
-                result["m15"] = m15
-            if m5 is not None:
-                result["m5"] = m5
-
-        return self._with_delay(_drop_none(result))
-
-    def _with_delay(self, result: dict) -> dict:
-        if self._delay_minutes is not None:
-            result["delay_minutes"] = self._delay_minutes
+        if "m15" not in result and "m5" not in result:
+            return _error(symbol, "no intraday data")
         return result
 
+    async def _pulse_one(self, symbol: str) -> dict:
+        try:
+            bars, today_bar = await asyncio.gather(
+                self._provider.get_daily(symbol, period=30),
+                self._provider.get_today(symbol),
+            )
+            if today_bar is None:
+                return _error(symbol, "no live session data")
+            if len(bars) < 2:
+                return _error(symbol, "insufficient daily data")
+            ind = compute_indicator(bars)
+            pulse = compute_pulse(today_bar, bars, ind.ema_fast)
+            return {
+                "symbol": symbol,
+                "name": self._name_map.get(symbol, symbol),
+                "pulse": dataclasses.asdict(pulse),
+            }
+        except Exception as exc:
+            _log.warning("pulse_one failed for %s: %s", symbol, exc, exc_info=True)
+            return _error(symbol, str(exc))
 
-# ---- Session builder ---------------------------------------------------------
-
-def _build_session(
-    today_bar: IntradaySnapshot | None,
-    prev_close: float,
-    bars: list[Bar],
-    ema_fast: float | None,
-) -> dict | None:
-    if today_bar is None:
-        return None
-    day_range = today_bar.high - today_bar.low
-    range_position = (
-        round((today_bar.close - today_bar.low) / day_range * 100, 1)
-        if day_range > 0 else 50.0
-    )
-    return _drop_none({
-        "current_price": today_bar.close,
-        "change_pct": _change_pct(today_bar.close, prev_close),
-        "gap_pct": _change_pct(today_bar.open, prev_close),
-        "high": today_bar.high,
-        "low": today_bar.low,
-        "range_pct": round((today_bar.high - today_bar.low) / prev_close * 100, 2) if prev_close > 0 else None,
-        "range_position": range_position,
-        "volume": today_bar.volume,
-        "relative_volume": _session_relative_volume(today_bar, bars),
-        "price_vs_ema": _price_vs_ema(today_bar.close, ema_fast),
-    })
-
+    async def _levels_one(self, symbol: str) -> dict:
+        try:
+            bars = await self._provider.get_daily(symbol, period=30)
+            if len(bars) < 2:
+                return _error(symbol, "insufficient data")
+            return {
+                "symbol": symbol,
+                "name": self._name_map.get(symbol, symbol),
+                "levels": _levels_to_dict(compute_levels(bars)),
+            }
+        except Exception as exc:
+            _log.warning("levels_one failed for %s: %s", symbol, exc, exc_info=True)
+            return _error(symbol, str(exc))
 
 # ---- Helpers -----------------------------------------------------------------
 
-def _change_pct(price: float, prev_close: float) -> float | None:
-    if prev_close <= 0:
-        return None
-    return round((price - prev_close) / prev_close * 100, 2)
-
-
-def _price_vs_ema(close: float, ema_fast: float | None) -> str | None:
-    if ema_fast is None:
-        return None
-    return "above" if close >= ema_fast else "below"
-
-
-def _session_relative_volume(today_bar: IntradaySnapshot, bars: list[Bar]) -> float | None:
-    if today_bar.volume is None:
-        return None
-    history = [b.volume for b in bars[-21:-1] if b.volume is not None]
-    if not history:
-        return None
-    avg = sum(history) / len(history)
-    return round(today_bar.volume / avg, 2) if avg > 0 else None
+def _error(symbol: str, msg: str) -> dict:
+    return {"symbol": symbol, "error": msg}
 
 
 def _indicators_to_dict(ind: IndicatorSet) -> dict:
-    return _drop_none({
+    return {
         "ema_trend": ind.ema_trend,
         "ema_alignment": ind.ema_alignment,
         "rsi": ind.rsi,
@@ -299,11 +310,11 @@ def _indicators_to_dict(ind: IndicatorSet) -> dict:
         "atr": ind.atr,
         "bb_width": ind.bb.width if ind.bb else None,
         "bb_pct_b": ind.bb.pct_b if ind.bb else None,
-    })
+    }
 
 
 def _levels_to_dict(lvl: PriceLevels) -> dict:
-    return _drop_none({
+    return {
         "prev_high": lvl.prev_high,
         "prev_low": lvl.prev_low,
         "prev_close": lvl.prev_close,
@@ -312,8 +323,4 @@ def _levels_to_dict(lvl: PriceLevels) -> dict:
         "weekly_low": lvl.weekly_low,
         "candle": dataclasses.asdict(lvl.candle) if lvl.candle else None,
         "relative_volume": lvl.relative_volume,
-    })
-
-
-def _drop_none(d: dict) -> dict:
-    return {k: v for k, v in d.items() if v is not None}
+    }

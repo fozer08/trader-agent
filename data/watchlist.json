@@ -26,6 +26,5 @@
   {"symbol": "TKFEN", "name": "Tekfen Holding",          "exchange": "bist", "market": "equities"},
   {"symbol": "TOASO", "name": "Tofaş",                   "exchange": "bist", "market": "equities"},
   {"symbol": "TTKOM", "name": "Türk Telekom",            "exchange": "bist", "market": "equities"},
-  {"symbol": "TUPRS", "name": "Tüpraş",                  "exchange": "bist", "market": "equities"},
-  {"symbol": "YKBNK", "name": "Yapı Kredi",              "exchange": "bist", "market": "equities"}
+  {"symbol": "TUPRS", "name": "Tüpraş",                  "exchange": "bist", "market": "equities"}
 ]

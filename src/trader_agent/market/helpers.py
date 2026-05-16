@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 
-from .types import Bar, TimeFrame
+from ..types import Bar, TimeFrame
 
 
 def aggregate_bars(

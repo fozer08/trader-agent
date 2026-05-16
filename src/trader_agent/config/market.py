@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, BeforeValidator
 
-from ..market.types import TradingSession
+from ..market.base import TradingSession
 from .base import BaseConfig, data_dir
 
 

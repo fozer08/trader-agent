@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from ..market.provider_base import MarketDataProvider
-from ..repository.portfolio import (
+from ..market.base import MarketDataProvider
+from ..repository import (
     ClosedPosition,
     PortfolioRepository,
     Position,
     PositionTransaction,
+    normalize_symbol,
 )
+from ..utils.logging import get_logger
 from .base import Tool
+
+_log = get_logger(__name__)
 
 
 class PortfolioTools:
@@ -24,7 +28,6 @@ class PortfolioTools:
     def __init__(self, repository: PortfolioRepository, provider: MarketDataProvider) -> None:
         self._repo = repository
         self._provider = provider
-        self._delay_minutes = getattr(provider, "delay_minutes", None)
 
     # ---- Tool handlers -------------------------------------------------------
 
@@ -39,7 +42,10 @@ class PortfolioTools:
         try:
             position = self._repo.buy(symbol, quantity, price, stop_loss, target)
             return {"position": _position_to_dict(position)}
+        except ValueError as exc:
+            return {"error": str(exc)}
         except Exception as exc:
+            _log.warning("buy_position failed for %s: %s", symbol, exc, exc_info=True)
             return {"error": str(exc)}
 
     async def sell_position(self, symbol: str, quantity: int, price: float) -> dict:
@@ -47,14 +53,17 @@ class PortfolioTools:
             position = self._repo.sell(symbol, quantity, price)
         except KeyError:
             return {"error": f"Pozisyon bulunamadı: {symbol}"}
+        except ValueError as exc:
+            return {"error": str(exc)}
         except Exception as exc:
+            _log.warning("sell_position failed for %s: %s", symbol, exc, exc_info=True)
             return {"error": str(exc)}
 
         if position is None:
-            closed = self._repo.list_closed(symbol=symbol)
-            archive = _closed_to_dict(closed[0]) if closed else None
-            return {"closed": True, "archived": archive}
-        return {"closed": False, "position": _position_to_dict(position)}
+            closed_list = self._repo.list_closed(symbol=symbol)
+            archive = _closed_to_dict(closed_list[0]) if closed_list else None
+            return {"closed": True, "position": None, "archived": archive}
+        return {"closed": False, "position": _position_to_dict(position), "archived": None}
 
     async def set_levels(
         self,
@@ -67,47 +76,58 @@ class PortfolioTools:
             return {"position": _position_to_dict(position)}
         except KeyError:
             return {"error": f"Pozisyon bulunamadı: {symbol}"}
+        except ValueError as exc:
+            return {"error": str(exc)}
         except Exception as exc:
+            _log.warning("set_levels failed for %s: %s", symbol, exc, exc_info=True)
             return {"error": str(exc)}
 
     async def remove_position(self, symbol: str) -> dict:
         try:
             removed = self._repo.remove(symbol)
-            return {"symbol": symbol.strip().upper(), "removed": removed}
-        except Exception as exc:
+        except ValueError as exc:
             return {"error": str(exc)}
+        except Exception as exc:
+            _log.warning("remove_position failed for %s: %s", symbol, exc, exc_info=True)
+            return {"error": str(exc)}
+        if not removed:
+            return {"error": f"Pozisyon bulunamadı: {symbol}"}
+        return {"symbol": normalize_symbol(symbol), "removed": True}
 
     async def clear_portfolio(self) -> dict:
         try:
             return {"removed_count": self._repo.clear()}
         except Exception as exc:
+            _log.warning("clear_portfolio failed: %s", exc, exc_info=True)
             return {"error": str(exc)}
 
     async def list_portfolio(self) -> dict:
         try:
             positions = self._repo.list()
         except Exception as exc:
+            _log.warning("list_portfolio failed: %s", exc, exc_info=True)
             return {"error": str(exc)}
 
         if not positions:
             return {"positions": []}
 
         prices = await asyncio.gather(*[self._safe_price(p.symbol) for p in positions])
-        enriched = [_enriched_position(p, price) for p, price in zip(positions, prices)]
-        result: dict = {"positions": enriched}
-        if self._delay_minutes is not None:
-            result["delay_minutes"] = self._delay_minutes
-        return result
+        return {"positions": [_enriched_position(p, price) for p, price in zip(positions, prices)]}
 
     async def get_position_tx(self, symbol: str) -> dict:
         try:
             txs = self._repo.transactions(symbol)
-            return {
-                "symbol": symbol.strip().upper(),
-                "transactions": [_tx_to_dict(t) for t in txs],
-            }
-        except Exception as exc:
+        except ValueError as exc:
             return {"error": str(exc)}
+        except Exception as exc:
+            _log.warning("get_position_tx failed for %s: %s", symbol, exc, exc_info=True)
+            return {"error": str(exc)}
+        if not txs:
+            return {"error": f"Pozisyon bulunamadı: {symbol}"}
+        return {
+            "symbol": normalize_symbol(symbol),
+            "transactions": [_tx_to_dict(t) for t in txs],
+        }
 
     async def list_closed(
         self,
@@ -121,6 +141,7 @@ class PortfolioTools:
             closed = self._repo.list_closed(since=since, symbol=symbol)
             return {"closed": [_closed_to_dict(c) for c in closed]}
         except Exception as exc:
+            _log.warning("list_closed failed: %s", exc, exc_info=True)
             return {"error": str(exc)}
 
     def as_tool_list(self) -> list[Tool]:
@@ -136,10 +157,10 @@ class PortfolioTools:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string", "description": "BIST ticker sembolü"},
-                        "quantity": {"type": "integer", "description": "Alınan lot adedi (pozitif)"},
-                        "price": {"type": "number", "description": "Hisse başına alım fiyatı (TL)"},
-                        "stop_loss": {"type": "number", "description": "Stop-loss seviyesi (TL)"},
-                        "target": {"type": "number", "description": "Kar al hedef seviyesi (TL)"},
+                        "quantity": {"type": "integer", "exclusiveMinimum": 0, "description": "Alınan lot adedi (pozitif)"},
+                        "price": {"type": "number", "exclusiveMinimum": 0, "description": "Hisse başına alım fiyatı (TL)"},
+                        "stop_loss": {"type": "number", "exclusiveMinimum": 0, "description": "Stop-loss seviyesi (TL)"},
+                        "target": {"type": "number", "exclusiveMinimum": 0, "description": "Kar al hedef seviyesi (TL)"},
                     },
                     "required": ["symbol", "quantity", "price"],
                 },
@@ -150,14 +171,16 @@ class PortfolioTools:
                 description=(
                     "Portföyden satım kaydı ekler. Kısmi satış mümkün; net miktar 0'a "
                     "düşerse pozisyon otomatik kapanır ve özet 'closed_positions' tablosuna "
-                    "arşivlenir. Mevcut miktardan fazla satılamaz."
+                    "arşivlenir. Mevcut miktardan fazla satılamaz. "
+                    "Döner: closed (bool); position (kapanmadıysa güncel pozisyon, kapandıysa null); "
+                    "archived (kapandıysa kapanmış özet, açık kaldıysa null)."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string", "description": "BIST ticker sembolü"},
-                        "quantity": {"type": "integer", "description": "Satılan lot adedi (pozitif)"},
-                        "price": {"type": "number", "description": "Hisse başına satım fiyatı (TL)"},
+                        "quantity": {"type": "integer", "exclusiveMinimum": 0, "description": "Satılan lot adedi (pozitif)"},
+                        "price": {"type": "number", "exclusiveMinimum": 0, "description": "Hisse başına satım fiyatı (TL)"},
                     },
                     "required": ["symbol", "quantity", "price"],
                 },
@@ -173,8 +196,8 @@ class PortfolioTools:
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string", "description": "BIST ticker sembolü"},
-                        "stop_loss": {"type": "number", "description": "Yeni stop-loss seviyesi (TL)"},
-                        "target": {"type": "number", "description": "Yeni hedef seviyesi (TL)"},
+                        "stop_loss": {"type": "number", "exclusiveMinimum": 0, "description": "Yeni stop-loss seviyesi (TL)"},
+                        "target": {"type": "number", "exclusiveMinimum": 0, "description": "Yeni hedef seviyesi (TL)"},
                     },
                     "required": ["symbol"],
                 },
@@ -198,8 +221,8 @@ class PortfolioTools:
             Tool(
                 name="clear_portfolio",
                 description=(
-                    "Tüm aktif pozisyonları siler. Audit kaydı tutulmaz; yıkıcı işlem, "
-                    "önce kullanıcıdan onay al."
+                    "Tüm aktif pozisyonları siler. Yıkıcı işlem — önce kullanıcıdan onay al. "
+                    "Audit kaydı tutulmaz, arşivlenmez."
                 ),
                 input_schema={"type": "object", "properties": {}, "required": []},
                 handler=self.clear_portfolio,
@@ -208,10 +231,12 @@ class PortfolioTools:
                 name="list_portfolio",
                 description=(
                     "Aktif pozisyonları döner. Her pozisyon için: symbol, quantity, avg_cost, "
-                    "opened_at, position_age_days, total_invested, avg_capital_deployed "
-                    "(zamana göre ortalama bağlı sermaye), stop_loss, target, realized_pnl "
-                    "(kısmi satışlar varsa), current_price ve unrealized_pnl_pct "
-                    "(canlı fiyat alınabildiyse). delay_minutes alanı varsa fiyat gecikmesi."
+                    "opened_at, updated_at, hold_days (açılış günü dahil inclusive), "
+                    "total_invested, total_received, realized_pnl, avg_capital_deployed "
+                    "(zamana göre ortalama bağlı sermaye), stop_loss, target (set edilmemişse null), "
+                    "current_price (canlı fiyat alınamadıysa null). "
+                    "Canlı fiyat varsa ek alanlar: unrealized_pnl, unrealized_pnl_pct, "
+                    "distance_to_stop_pct (stop_loss set ise), distance_to_target_pct (target set ise)."
                 ),
                 input_schema={"type": "object", "properties": {}, "required": []},
                 handler=self.list_portfolio,
@@ -220,7 +245,8 @@ class PortfolioTools:
                 name="get_position_tx",
                 description=(
                     "Tek bir pozisyonun tüm alım/satım transaction kayıtlarını "
-                    "kronolojik olarak döner."
+                    "kronolojik olarak döner. Her transaction için: id, kind (BUY/SELL), "
+                    "quantity, price, created_at. Pozisyon yoksa error döner."
                 ),
                 input_schema={
                     "type": "object",
@@ -244,6 +270,7 @@ class PortfolioTools:
                     "properties": {
                         "since_days": {
                             "type": "integer",
+                            "exclusiveMinimum": 0,
                             "description": "Son N gün içinde kapananları getir (opsiyonel)",
                         },
                         "symbol": {"type": "string", "description": "Sadece bu sembol (opsiyonel)"},
@@ -259,7 +286,8 @@ class PortfolioTools:
     async def _safe_price(self, symbol: str) -> float | None:
         try:
             snapshot = await self._provider.get_today(symbol)
-        except Exception:
+        except Exception as exc:
+            _log.warning("price fetch failed for %s: %s", symbol, exc)
             return None
         return snapshot.close if snapshot is not None else None
 
@@ -267,32 +295,27 @@ class PortfolioTools:
 # ---- helpers -----------------------------------------------------------------
 
 def _position_to_dict(p: Position) -> dict:
-    age_days = (datetime.now(timezone.utc).date() - p.opened_at.date()).days + 1
-    d: dict = {
+    return {
         "symbol": p.symbol,
         "quantity": p.quantity,
         "avg_cost": round(p.avg_cost, 4),
         "opened_at": p.opened_at.isoformat(),
-        "position_age_days": age_days,
+        "updated_at": p.updated_at.isoformat(),
+        "hold_days": p.hold_days,
         "total_invested": round(p.total_invested, 2),
+        "realized_pnl": round(p.realized_pnl, 2),
+        "total_received": round(p.total_received, 2),
+        "avg_capital_deployed": round(p.avg_capital_deployed, 2),
+        "stop_loss": p.stop_loss,
+        "target": p.target,
     }
-    if age_days > 0:
-        d["avg_capital_deployed"] = round(p.capital_time_days / age_days, 2)
-    if p.realized_pnl != 0:
-        d["realized_pnl"] = round(p.realized_pnl, 2)
-        d["total_received"] = round(p.total_received, 2)
-    if p.stop_loss is not None:
-        d["stop_loss"] = p.stop_loss
-    if p.target is not None:
-        d["target"] = p.target
-    return d
 
 
 def _enriched_position(p: Position, current_price: float | None) -> dict:
     d = _position_to_dict(p)
-    if current_price is None or p.avg_cost <= 0:
-        return d
     d["current_price"] = current_price
+    if current_price is None:
+        return d
     d["unrealized_pnl"] = round(p.quantity * (current_price - p.avg_cost), 2)
     d["unrealized_pnl_pct"] = round((current_price - p.avg_cost) / p.avg_cost * 100, 2)
     if p.stop_loss is not None:

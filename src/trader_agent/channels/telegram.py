@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -41,23 +42,41 @@ async def _on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     session_id = str(update.effective_chat.id)
     await ctx.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
 
+    text_buffer: list[str] = []
+    error_message: str | None = None
     try:
-        async with httpx.AsyncClient(base_url=SERVER_URL, timeout=180) as client:
-            r = await client.post(
+        async with httpx.AsyncClient(base_url=SERVER_URL, timeout=600) as client:
+            async with client.stream(
+                "POST",
                 "/v1/chat",
                 json={
                     "session_id": session_id,
                     "message": update.message.text,
                     "output_format": "telegram_html",
                 },
-            )
-            r.raise_for_status()
-            data = r.json()
+            ) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    kind = event.get("type")
+                    if kind == "text":
+                        text_buffer.append(event.get("content", ""))
+                    elif kind == "error":
+                        error_message = event.get("message", "bilinmeyen hata")
     except Exception as exc:
         await update.message.reply_text(f"Hata oluştu: {exc}")
         return
 
-    response = data.get("response", "")
+    if error_message is not None:
+        await update.message.reply_text(f"Hata: {error_message}")
+        return
+
+    response = "".join(text_buffer)
     if not response:
         await update.message.reply_text("Yanıt alınamadı.")
         return

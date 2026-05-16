@@ -4,6 +4,7 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..agent.runner import AgentRunner
@@ -12,14 +13,15 @@ from ..env import load_env
 from ..market.provider import IsYatirimProvider
 from ..repository import (
     PortfolioRepository,
-    RecommendationRepository,
     create_db_engine,
     create_session_factory,
     init_schema,
 )
 from ..tools.analysis import AnalysisTools
 from ..tools.portfolio import PortfolioTools
-from ..tools.recommendations import RecommendationTools
+from ..utils.logging import get_logger
+
+_log = get_logger(__name__)
 
 
 # ---- State -------------------------------------------------------------------
@@ -36,23 +38,23 @@ class _RunnerFactory:
         watchlist: list[dict],
         provider: IsYatirimProvider,
         portfolio_repo: PortfolioRepository,
-        recommendation_repo: RecommendationRepository,
     ) -> None:
         self._cfg = cfg
         self._watchlist = watchlist
         self._tools = [
             *AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list(),
             *PortfolioTools(repository=portfolio_repo, provider=provider).as_tool_list(),
-            *RecommendationTools(repository=recommendation_repo).as_tool_list(),
         ]
-        self._session = cfg.market.exchanges["bist"].trading_session("equities")
+        self._trading_session = cfg.market.exchanges["bist"].trading_session("equities")
+        self._delay_minutes = getattr(provider, "delay_minutes", None)
 
     def make(self, output_format: str = "plain") -> AgentRunner:
         return AgentRunner(
             config=self._cfg.llm,
             watchlist=self._watchlist,
-            session=self._session,
+            session=self._trading_session,
             tools=self._tools,
+            delay_minutes=self._delay_minutes,
             output_format=output_format,
         )
 
@@ -77,11 +79,10 @@ async def lifespan(app: FastAPI):
     init_schema(engine)
     session_factory = create_session_factory(engine)
     portfolio_repo = PortfolioRepository(session_factory)
-    recommendation_repo = RecommendationRepository(session_factory)
     async with IsYatirimProvider(
         session=cfg.market.exchanges["bist"].trading_session("equities")
     ) as provider:
-        _runner_factory = _RunnerFactory(cfg, watchlist, provider, portfolio_repo, recommendation_repo)
+        _runner_factory = _RunnerFactory(cfg, watchlist, provider, portfolio_repo)
         _sessions = {}
         try:
             yield
@@ -104,19 +105,15 @@ class ChatRequest(BaseModel):
     output_format: str = "plain"
 
 
-class ChatResponse(BaseModel):
-    response: str
-    tools_used: list[str]
-
-
 class ResetRequest(BaseModel):
     session_id: str
 
 
 # ---- Routes ------------------------------------------------------------------
 
-@app.post("/v1/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+@app.post("/v1/chat")
+async def chat(req: ChatRequest) -> StreamingResponse:
+    """ndjson stream: her satır bir event — {type: "text"|"tool"|"error", ...}."""
     if _runner_factory is None:
         raise HTTPException(status_code=503, detail="Server not ready")
 
@@ -127,16 +124,21 @@ async def chat(req: ChatRequest) -> ChatResponse:
         _sessions[req.session_id] = _runner_factory.make(req.output_format)
 
     runner = _sessions[req.session_id]
-    text_chunks: list[str] = []
-    tools_used: list[str] = []
 
-    async for chunk in runner.chat(req.message):
-        if chunk.startswith("\x00TOOL:") and chunk.endswith("\x00"):
-            tools_used.append(chunk[6:-1])
-        else:
-            text_chunks.append(chunk)
+    async def event_stream():
+        try:
+            async for chunk in runner.chat(req.message):
+                if chunk.startswith("\x00TOOL:") and chunk.endswith("\x00"):
+                    event = {"type": "tool", "name": chunk[6:-1]}
+                else:
+                    event = {"type": "text", "content": chunk}
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            _log.exception("chat stream failed")
+            err = {"type": "error", "message": str(exc) or type(exc).__name__}
+            yield json.dumps(err, ensure_ascii=False) + "\n"
 
-    return ChatResponse(response="".join(text_chunks), tools_used=tools_used)
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @app.post("/v1/reset")
@@ -149,3 +151,11 @@ async def reset(req: ResetRequest) -> dict:
 @app.get("/v1/status")
 async def status() -> dict:
     return {"sessions": list(_sessions.keys())}
+
+
+@app.get("/v1/debug/state")
+async def debug_state(session_id: str) -> dict:
+    runner = _sessions.get(session_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    return runner.memory_dump()

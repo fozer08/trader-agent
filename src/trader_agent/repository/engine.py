@@ -21,6 +21,6 @@ def create_session_factory(engine: Engine) -> Callable[[], Session]:
 
 def init_schema(engine: Engine) -> None:
     """ORM tablolarını yaratır."""
-    from . import portfolio, recommendations
+    from . import portfolio  # noqa: F401 — ORM modellerinin metadata'ya kaydı için import gerekli
 
     Base.metadata.create_all(engine)
