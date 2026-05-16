@@ -184,11 +184,18 @@ class AgentRunner:
         try:
             response = await self._client.messages.create(
                 model=self._config.light_model,
-                system=STATE_PROMPT,
+                system=[
+                    {
+                        "type": "text",
+                        "text": STATE_PROMPT,
+                        # Breakpoint system'de → tools + system birlikte cache'lenir.
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    }
+                ],
                 messages=[{"role": "user", "content": user_msg}],
                 tools=[self._state_tool_schema],
                 tool_choice={"type": "tool", "name": _UPDATE_STATE_TOOL},
-                max_tokens=8192,
+                max_tokens=self._config.max_output_tokens,
             )
         except Exception as exc:
             _log.warning("state generation API call failed: %s", exc, exc_info=True)
@@ -375,10 +382,10 @@ def _render_prompt(template: str, **values: str) -> str:
 
 
 def _build_tool_schemas(tools: list[Tool]) -> list[dict]:
-    schemas = [t.to_api_dict() for t in tools]
-    if schemas:
-        schemas[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
-    return schemas
+    # Tools'a ayrı cache breakpoint koymuyoruz: ``_build_system_param``'daki
+    # ilk system block'unun cache_control'ü zaten cumulative olarak tools'u kapsar
+    # (cache prefix sırası: tools → system → messages).
+    return [t.to_api_dict() for t in tools]
 
 
 def _update_state_tool_schema() -> dict:

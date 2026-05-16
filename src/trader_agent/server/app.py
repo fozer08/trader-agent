@@ -45,7 +45,7 @@ class _RunnerFactory:
             *AnalysisTools(provider=provider, watchlist=watchlist).as_tool_list(),
             *PortfolioTools(repository=portfolio_repo, provider=provider).as_tool_list(),
         ]
-        self._trading_session = cfg.market.exchanges["bist"].trading_session("equities")
+        self._trading_session = cfg.market.exchange.trading_session()
         self._delay_minutes = getattr(provider, "delay_minutes", None)
 
     def make(self, output_format: str = "plain") -> AgentRunner:
@@ -66,8 +66,6 @@ async def lifespan(app: FastAPI):
     global _runner_factory, _sessions
     load_env()
     cfg = MainConfig.load()
-    if "bist" not in cfg.market.exchanges:
-        raise RuntimeError("Config'de 'bist' exchange tanımlı değil.")
     watchlist_path = cfg.market.watchlist_path()
     if not watchlist_path.exists():
         raise RuntimeError(f"Watchlist dosyası bulunamadı: {watchlist_path}")
@@ -80,7 +78,7 @@ async def lifespan(app: FastAPI):
     session_factory = create_session_factory(engine)
     portfolio_repo = PortfolioRepository(session_factory)
     async with IsYatirimProvider(
-        session=cfg.market.exchanges["bist"].trading_session("equities")
+        session=cfg.market.exchange.trading_session()
     ) as provider:
         _runner_factory = _RunnerFactory(cfg, watchlist, provider, portfolio_repo)
         _sessions = {}

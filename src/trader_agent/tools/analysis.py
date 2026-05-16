@@ -82,10 +82,10 @@ class AnalysisTools:
             Tool(
                 name="scan",
                 description=(
-                    "Tüm watchlist için curated kısa özet tarama; geniş piyasa görünümü ve fırsat arama için kullan. "
+                    "Tüm watchlist için kısa özet tarama; geniş piyasa görünümü ve fırsat arama için kullan. "
                     "Her hisse için: daily (son seans bazlı) — EMA trend/hizalama, RSI, ATR, göreceli hacim, mum formasyonu; "
                     "pulse (seans açıksa) — canlı fiyat, % değişim (gap dahil/hariç), gap, gün içi yüksek/düşük/aralık, "
-                    "göreceli hacim, EMA'ya konum. "
+                    "göreceli hacim, EMA'ya konum. Seans kapalıysa pulse=null. "
                     "Belirli sembol(ler) için daha derinlemesine bilgi gerekiyorsa get_daily_indicators / get_intraday_indicators / get_pulse / get_levels kullan."
                 ),
                 input_schema={
@@ -100,7 +100,7 @@ class AnalysisTools:
                 description=(
                     "Belirli semboller için D1 (günlük) teknik indikatörler: EMA trend/hizalama, "
                     "RSI + bullish/bearish uyumsuzluk, MACD histogram, ATR, Bollinger width/pct_b. "
-                    "Yapısal trend ve karar için kullan; intraday momentum için get_intraday_indicators."
+                    "Yapısal trend ve setup değerlendirmesi için kullan; intraday momentum için get_intraday_indicators."
                 ),
                 input_schema={
                     "type": "object",
@@ -120,7 +120,8 @@ class AnalysisTools:
                 name="get_intraday_indicators",
                 description=(
                     "Belirli semboller için M15 + M5 intraday teknik indikatörler. "
-                    "Her hisse için iki timeframe paralel döner — EMA, RSI, ATR, Bollinger. "
+                    "M15: EMA trend + hizalama, RSI, ATR, Bollinger. "
+                    "M5: EMA trend (yalın), RSI, ATR (yalın momentum — alignment ve Bollinger yok). "
                     "Seans açıkken intraday momentum/giriş timing'i için kullan; yapısal trend için get_daily_indicators."
                 ),
                 input_schema={

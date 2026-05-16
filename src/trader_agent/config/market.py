@@ -25,42 +25,29 @@ def _parse_time(v: object) -> time:
 TimeField = Annotated[time, BeforeValidator(_parse_time)]
 
 
-class SessionConfig(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    open: TimeField
-    close: TimeField
-
-
-class MarketTypeConfig(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    session: SessionConfig
-
-
 class ExchangeConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     name: str
+    code: str
     mic: str
     timezone: str
-    symbol_suffix: str
-    markets: dict[str, MarketTypeConfig]
+    open: TimeField
+    close: TimeField
 
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
 
-    def trading_session(self, market: str) -> TradingSession:
-        session = self.markets[market].session
-        return TradingSession(start=session.open, end=session.close, timezone=self.tz)
+    def trading_session(self) -> TradingSession:
+        return TradingSession(start=self.open, end=self.close, timezone=self.tz)
 
 
 class MarketConfig(BaseConfig):
     CONFIG_FILENAME: ClassVar[str] = "market.yaml"
 
     watchlist: str
-    exchanges: dict[str, ExchangeConfig]
+    exchange: ExchangeConfig
 
     def watchlist_path(self) -> Path:
         return data_dir() / self.watchlist
