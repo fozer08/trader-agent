@@ -25,7 +25,7 @@ class IsYatirimProvider(MarketDataProvider):
 
     source = "isyatirim"
     supported_exchanges = {"bist"}
-    calls_per_minute = 10
+    calls_per_minute = 15
 
     delay_minutes = 15   # İş Yatırım ücretsiz feed gecikmesi (dakika)
     user_agent = "Mozilla/5.0"
