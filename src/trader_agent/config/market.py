@@ -3,10 +3,9 @@ from __future__ import annotations
 from datetime import time
 from pathlib import Path
 from typing import Annotated, ClassVar
-
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, BeforeValidator
+from pydantic import BaseModel, BeforeValidator, Field
 
 from ..market.base import TradingSession
 from .base import BaseConfig, data_dir
@@ -28,12 +27,12 @@ TimeField = Annotated[time, BeforeValidator(_parse_time)]
 class ExchangeConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    name: str
-    code: str
-    mic: str
-    timezone: str
-    open: TimeField
-    close: TimeField
+    name: str = "Borsa İstanbul"
+    code: str = "bist"
+    mic: str = "XIST"
+    timezone: str = "Europe/Istanbul"
+    open: TimeField = time(10, 0)
+    close: TimeField = time(18, 0)
 
     @property
     def tz(self) -> ZoneInfo:
@@ -46,8 +45,8 @@ class ExchangeConfig(BaseModel):
 class MarketConfig(BaseConfig):
     CONFIG_FILENAME: ClassVar[str] = "market.yaml"
 
-    watchlist: str
-    exchange: ExchangeConfig
+    watchlist: str = "watchlist.json"
+    exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
 
     def watchlist_path(self) -> Path:
         return data_dir() / self.watchlist
