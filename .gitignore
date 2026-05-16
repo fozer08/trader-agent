@@ -18,7 +18,8 @@ build/
 .pytest_cache/
 .claude/
 
-# Data & logs
+# Data & logs & configs
+configs/
 data/*.db
 data/kap_cache/
 logs/
