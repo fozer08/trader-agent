@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from trader_agent.analysis.technical import PROFILES, compute
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.analysis.indicators import PROFILES, compute_indicator as compute
+from trader_agent.types import Bar, TimeFrame
 
 
 def _bar(i: int, close: float, tf: TimeFrame = TimeFrame.D1, volume: float | None = 1000.0) -> Bar:
@@ -86,7 +86,7 @@ def test_d1_ema_alignment_bullish_when_fast_above_slow():
 
 def test_d1_ema_alignment_none_when_slow_unavailable():
     # Yeterli bar var ama M5 profilinde ema_slow=None
-    from trader_agent.market.types import TimeFrame
+    from trader_agent.types import TimeFrame
     result = compute(_intraday_bars(20, TimeFrame.M5))
     assert result.ema_alignment is None
 

@@ -4,7 +4,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from trader_agent.market.helpers import aggregate_bars, calc_session_bounds
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.types import Bar, TimeFrame
 
 
 TZ = ZoneInfo("Europe/Istanbul")

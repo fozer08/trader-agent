@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta
 from string import Template
 from typing import Any, AsyncGenerator
+from zoneinfo import ZoneInfo
 
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
@@ -45,6 +46,7 @@ class AgentRunner:
         config: LLMConfig,
         watchlist: list[dict],
         session: TradingSession,
+        exchange_name: str,
         tools: list[Tool],
         delay_minutes: int | None = None,
         output_format: str = "plain",
@@ -52,6 +54,7 @@ class AgentRunner:
         self._config = config
         self._watchlist = watchlist
         self._session = session
+        self._exchange_name = exchange_name
         self._delay_minutes = delay_minutes
         self._output_format = output_format
         self._tools = {t.name: t for t in tools}
@@ -313,9 +316,11 @@ class AgentRunner:
 
         return _render_prompt(
             CONTEXT_PROMPT,
+            exchange_name=self._exchange_name,
             day_name=day_name,
             date=now.strftime("%d.%m.%Y"),
             time=now.strftime("%H:%M"),
+            tz_label=_tz_label(self._session.timezone),
             session_status=session_status,
             session_phase=session_phase,
             session_timing=session_timing,
@@ -379,6 +384,17 @@ def _format_turn_transcript(turn_messages: list[dict]) -> str:
 
 def _render_prompt(template: str, **values: str) -> str:
     return Template(template.strip()).safe_substitute(values)
+
+
+def _tz_label(tz: ZoneInfo) -> str:
+    """IANA timezone'dan okunabilir şehir etiketi türetir.
+
+    Örn: ``Europe/Istanbul`` → ``Istanbul``, ``America/New_York`` → ``New York``.
+    Tek segmentli (örn. ``UTC``) timezone'lar için olduğu gibi döner.
+    """
+    key = getattr(tz, "key", str(tz))
+    last = key.split("/")[-1]
+    return last.replace("_", " ")
 
 
 def _build_tool_schemas(tools: list[Tool]) -> list[dict]:

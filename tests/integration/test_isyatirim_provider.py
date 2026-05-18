@@ -4,13 +4,13 @@ import pytest
 
 from trader_agent.config.market import MarketConfig
 from trader_agent.market.provider import IsYatirimProvider
-from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
+from trader_agent.types import Bar, IntradaySnapshot, TimeFrame
 
 
 @pytest.fixture
 async def provider():
     config = MarketConfig.load()
-    session = config.exchanges["bist"].trading_session("equities")
+    session = config.exchange.trading_session()
     async with IsYatirimProvider(session=session, timeout=10) as p:
         yield p
 

@@ -4,8 +4,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from trader_agent.market.provider_base import MarketDataProvider
-from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
+from trader_agent.market.base import MarketDataProvider
+from trader_agent.types import Bar, IntradaySnapshot, TimeFrame
 from trader_agent.repository.base import Base
 from trader_agent.repository.portfolio import PortfolioRepository
 from trader_agent.tools.portfolio import PortfolioTools
@@ -62,7 +62,7 @@ async def test_buy_position_new_symbol(tools):
     assert pos["quantity"] == 100
     assert pos["avg_cost"] == 285.50
     assert "opened_at" in pos
-    assert pos["position_age_days"] >= 1
+    assert pos["hold_days"] >= 1
 
 
 async def test_buy_position_with_levels(tools):
@@ -153,7 +153,7 @@ async def test_remove_position_existing(tools):
 
 async def test_remove_position_missing(tools):
     result = await tools.remove_position("THYAO")
-    assert result == {"symbol": "THYAO", "removed": False}
+    assert "error" in result
 
 
 async def test_clear_portfolio(tools):
@@ -192,7 +192,6 @@ async def test_list_portfolio_enriches_with_unrealized():
     assert pos["unrealized_pnl"] == pytest.approx(100 * (110.0 - 100.0))
     assert pos["distance_to_stop_pct"] == pytest.approx(round((110.0 - 95.0) / 110.0 * 100, 2))
     assert pos["distance_to_target_pct"] == pytest.approx(round((120.0 - 110.0) / 110.0 * 100, 2))
-    assert result["delay_minutes"] == 15
 
 
 async def test_list_portfolio_skips_enrichment_when_no_price():
@@ -200,8 +199,10 @@ async def test_list_portfolio_skips_enrichment_when_no_price():
     await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0)
     result = await tools.list_portfolio()
     pos = result["positions"][0]
-    assert "current_price" not in pos
+    assert pos["current_price"] is None
     assert "unrealized_pnl" not in pos
+    assert "unrealized_pnl_pct" not in pos
+    assert "distance_to_stop_pct" not in pos
     assert pos["stop_loss"] == 95.0
 
 
@@ -218,9 +219,9 @@ async def test_get_position_tx_returns_chronological(tools):
     assert [t["quantity"] for t in txs] == [100, 30, 50]
 
 
-async def test_get_position_tx_empty(tools):
+async def test_get_position_tx_missing_returns_error(tools):
     result = await tools.get_position_tx("XYZ")
-    assert result["transactions"] == []
+    assert "error" in result
 
 
 # ---- list_closed -------------------------------------------------------------

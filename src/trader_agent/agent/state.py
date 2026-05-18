@@ -10,16 +10,18 @@ _MAX_DECISIONS = 25
 
 
 class ActiveThesis(BaseModel):
-    """Bir hisse için aktif olarak izlenen veya geçmişte değerlendirilen tez."""
+    """Bir hisse için aktif olarak izlenen qualitative tez.
+
+    Somut fiyat seviyeleri (entry/stop/target) BURADA tutulmaz; her seferinde
+    fresh ``get_levels``/``get_daily_indicators`` ile yeniden hesaplanır. State'in
+    plan numaralarını cache'leyip canlı veriyi baskılamasını önler. Tez sadece
+    niyet, tetik tipi ve durum notu olarak kayda alınır.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     stance: Literal["watching", "committed", "passed"]
-    direction: Literal["long", "short"]
     thesis: str = Field(max_length=200)
-    entry: float | None = None
-    stop: float | None = None
-    target: float | None = None
     noted_at: datetime
     last_reviewed: datetime
     status_note: str = Field(default="", max_length=200)
@@ -45,39 +47,36 @@ class Decision(BaseModel):
     entry: float
     stop: float
     target: float | None = None
-    rationale: str = Field(max_length=300)
+    rationale: str = Field(max_length=400)
     at: datetime
     outcome: DecisionOutcome | None = None
 
 
-class MarketView(BaseModel):
-    """Genel piyasa görüşü ve gündemdeki temalar."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    stance: str = Field(max_length=500)
-    themes: list[str] = Field(default_factory=list, max_length=5)
-    updated_at: datetime
-
-
 class UserContext(BaseModel):
-    """Kullanıcıdan öğrenilen tercih ve kısıtlar."""
+    """Kullanıcıdan öğrenilen kalıcı tercih ve kısıtlar.
+
+    Açık sorular gibi turn-over hızlı bilgiler burada tutulmaz; onlar rolling
+    narrative summary'de yer alır.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     preferences: list[str] = Field(default_factory=list, max_length=10)
     constraints: list[str] = Field(default_factory=list, max_length=10)
-    open_questions: list[str] = Field(default_factory=list, max_length=5)
 
 
 class AgentState(BaseModel):
-    """Agent'ın turlar arası hafızası; trim sonrası kaybolmayacak yorumsal kayıt."""
+    """Agent'ın turlar arası hafızası; trim sonrası kaybolmayacak yorumsal kayıt.
+
+    Genel piyasa görüşü gibi sistemin erişimi olmayan (makro, endeks, FX, sektör)
+    verilere dayanan alanlar burada **tutulmaz**; her seferinde shallow
+    derivation'a düşer. Piyasa hissi yorumu varsa summary'e gömülür.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     active_theses: dict[str, ActiveThesis] = Field(default_factory=dict)
     decisions: list[Decision] = Field(default_factory=list, max_length=_MAX_DECISIONS)
-    market_view: MarketView | None = None
     user_context: UserContext = Field(default_factory=UserContext)
 
     @model_validator(mode="after")
@@ -90,8 +89,6 @@ class AgentState(BaseModel):
         return (
             not self.active_theses
             and not self.decisions
-            and self.market_view is None
             and not self.user_context.preferences
             and not self.user_context.constraints
-            and not self.user_context.open_questions
         )

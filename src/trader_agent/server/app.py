@@ -46,6 +46,7 @@ class _RunnerFactory:
             *PortfolioTools(repository=portfolio_repo, provider=provider).as_tool_list(),
         ]
         self._trading_session = cfg.market.exchange.trading_session()
+        self._exchange_name = cfg.market.exchange.name
         self._delay_minutes = getattr(provider, "delay_minutes", None)
 
     def make(self, output_format: str = "plain") -> AgentRunner:
@@ -53,6 +54,7 @@ class _RunnerFactory:
             config=self._cfg.llm,
             watchlist=self._watchlist,
             session=self._trading_session,
+            exchange_name=self._exchange_name,
             tools=self._tools,
             delay_minutes=self._delay_minutes,
             output_format=output_format,

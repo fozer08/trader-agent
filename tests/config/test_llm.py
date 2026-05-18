@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import yaml
 import pytest
+import yaml
 
 from trader_agent.config.llm import LLMConfig
 
@@ -9,11 +9,10 @@ from trader_agent.config.llm import LLMConfig
 def test_defaults(cfg_dir):
     config = LLMConfig.load()
     assert config.provider == "anthropic"
+    assert config.agent_model == "claude-sonnet-4-6"
     assert config.light_model == "claude-sonnet-4-6"
-    assert config.heavy_model == "claude-opus-4-7"
-    assert config.max_output_tokens == 4096
-    assert config.use_extended_thinking is True
-    assert config.streaming is True
+    assert config.max_output_tokens == 8192
+    assert config.use_extended_thinking is False
 
 
 def test_yaml_overrides_defaults(cfg_dir):

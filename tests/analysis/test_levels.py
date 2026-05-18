@@ -4,8 +4,23 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from trader_agent.analysis.levels import compute_levels, compute_session_snapshot
-from trader_agent.market.types import Bar, IntradaySnapshot, TimeFrame
+from trader_agent.analysis.levels import compute_levels
+from trader_agent.analysis.pulse import compute_pulse
+from trader_agent.types import Bar, IntradaySnapshot, TimeFrame
+
+
+def _prev_bar(prev_close: float) -> Bar:
+    """compute_pulse'un beklediği günlük bar listesinin minimum (1 elemanlı) hali."""
+    return Bar(
+        symbol="TEST",
+        datetime=datetime(2025, 12, 31, tzinfo=timezone.utc),
+        timeframe=TimeFrame.D1,
+        open=prev_close,
+        high=prev_close,
+        low=prev_close,
+        close=prev_close,
+        volume=None,
+    )
 
 
 def _bar(
@@ -205,59 +220,59 @@ def test_relative_volume_none_when_volume_missing():
     assert compute_levels(bars).relative_volume is None
 
 
-# ---- compute_session_snapshot ---------------------------------------------------
+# ---- compute_pulse (session snapshot) -------------------------------------------
 
 def test_session_snapshot_change_pct():
     today = _snapshot(open_=100, high=106, low=99, close=104)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.change_pct == pytest.approx(4.0)
 
 
 def test_session_snapshot_gap_pct():
     # Dün kapanış 100, bugün açılış 103 → %3 gap up
     today = _snapshot(open_=103, high=106, low=99, close=104)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.gap_pct == pytest.approx(3.0)
 
 
 def test_session_snapshot_range_pct():
     today = _snapshot(open_=100, high=110, low=90, close=105)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.range_pct == pytest.approx(20.0)
 
 
 def test_session_snapshot_range_position_at_top():
     # close == high → tepe, %100
     today = _snapshot(open_=100, high=110, low=90, close=110)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.range_position == pytest.approx(100.0)
 
 
 def test_session_snapshot_range_position_at_bottom():
     # close == low → dip, %0
     today = _snapshot(open_=100, high=110, low=90, close=90)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.range_position == pytest.approx(0.0)
 
 
 def test_session_snapshot_range_position_middle():
     # close tam ortada
     today = _snapshot(open_=100, high=110, low=90, close=100)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.range_position == pytest.approx(50.0)
 
 
 def test_session_snapshot_fields():
     today = _snapshot(open_=100, high=106, low=99, close=104, volume=2000.0)
-    ctx = compute_session_snapshot(today, prev_close=100.0)
+    ctx = compute_pulse(today, [_prev_bar(100.0)], None)
     assert ctx.open == 100
     assert ctx.high == 106
     assert ctx.low == 99
-    assert ctx.close == 104
+    assert ctx.current_price == 104
     assert ctx.volume == 2000.0
 
 
 def test_session_snapshot_raises_on_zero_prev_close():
     today = _snapshot(open_=100, high=106, low=99, close=104)
     with pytest.raises(ValueError):
-        compute_session_snapshot(today, prev_close=0.0)
+        compute_pulse(today, [_prev_bar(0.0)], None)

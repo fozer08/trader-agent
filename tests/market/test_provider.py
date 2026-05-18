@@ -9,7 +9,8 @@ import pytest
 
 from trader_agent.market.cache import MarketBarCache
 from trader_agent.market.provider import IsYatirimProvider
-from trader_agent.market.types import Bar, IntradaySnapshot, PricePoint, TimeFrame, TradingSession
+from trader_agent.market.base import PricePoint, TradingSession
+from trader_agent.types import Bar, IntradaySnapshot, TimeFrame
 
 
 TZ = ZoneInfo("Europe/Istanbul")
@@ -290,7 +291,8 @@ async def test_get_daily_cross_symbol_isolation():
 
 @pytest.mark.asyncio
 async def test_get_daily_large_period_expands_fetch_window():
-    """Büyük period istekleri varsayılan 365 günlük pencereyle sınırlı kalmaz."""
+    """Büyük period istekleri varsayılan pencereyle sınırlı kalmaz; fetch geriye
+    period * 7/5 + padding kadar uzar."""
     requested_start_dates: list[date] = []
     today = datetime.now(TZ).date()
     body = _daily_body(_daily_rows_back(days=450))
@@ -307,9 +309,10 @@ async def test_get_daily_large_period_expands_fetch_window():
     ) as provider:
         result = await provider.get_daily("THYAO", period=300)
 
+    # period=300 → int(300 * 7/5) + 10 = 430 takvim günü geri git (200 default'tan büyük)
     assert len(result) == 300
     assert requested_start_dates
-    assert requested_start_dates[0] <= today - timedelta(days=440)
+    assert requested_start_dates[0] <= today - timedelta(days=400)
 
 
 # ---- Intraday cache davranışı --------------------------------------------------

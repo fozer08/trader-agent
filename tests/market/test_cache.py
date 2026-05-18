@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from trader_agent.market.cache import MarketBarCache
-from trader_agent.market.types import Bar, TimeFrame
+from trader_agent.types import Bar, TimeFrame
 
 UTC = timezone.utc
 
