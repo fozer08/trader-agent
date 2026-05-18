@@ -8,7 +8,7 @@ from pydantic import Field
 from .base import BaseConfig
 
 DEFAULT_AGENT_MODELS = {
-    "anthropic": "claude-optus-4-7",
+    "anthropic": "claude-opus-4-7",
 }
 
 DEFAULT_LIGHT_MODELS = {
