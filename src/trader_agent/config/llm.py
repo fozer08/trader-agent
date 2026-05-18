@@ -8,11 +8,11 @@ from pydantic import Field
 from .base import BaseConfig
 
 DEFAULT_AGENT_MODELS = {
-    "anthropic": "claude-sonnet-4-6",
+    "anthropic": "claude-optus-4-7",
 }
 
 DEFAULT_LIGHT_MODELS = {
-    "anthropic": "claude-sonnet-4-6",
+    "anthropic": "claude-haiku-4-5",
 }
 
 
