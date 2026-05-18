@@ -67,6 +67,13 @@ def test_defaults_when_yaml_missing(cfg_dir):
     assert config.exchange.timezone == "Europe/Istanbul"
 
 
+def test_defaults_saved_as_plain_yaml(cfg_dir):
+    MarketConfig.load()
+    saved = yaml.safe_load((cfg_dir / "market.yaml").read_text())
+    assert saved["exchange"]["open"] == "10:00"
+    assert saved["exchange"]["close"] == "18:00"
+
+
 def test_unknown_field_rejected(cfg_dir):
     (cfg_dir / "market.yaml").write_text(yaml.dump({**MARKET_YAML, "unknown_field": True}))
     with pytest.raises(Exception):

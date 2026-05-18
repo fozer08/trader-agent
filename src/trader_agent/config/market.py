@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, ClassVar
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, field_serializer
 
 from ..market.base import TradingSession
 from .base import BaseConfig, data_dir
@@ -16,8 +16,9 @@ def _parse_time(v: object) -> time:
         return v
     if isinstance(v, str):
         parts = v.split(":")
-        if len(parts) == 2:
-            return time(int(parts[0]), int(parts[1]))
+        if len(parts) in {2, 3}:
+            second = int(parts[2]) if len(parts) == 3 else 0
+            return time(int(parts[0]), int(parts[1]), second)
     raise ValueError(f"Cannot parse time: {v!r}")
 
 
@@ -33,6 +34,10 @@ class ExchangeConfig(BaseModel):
     timezone: str = "Europe/Istanbul"
     open: TimeField = time(10, 0)
     close: TimeField = time(18, 0)
+
+    @field_serializer("open", "close")
+    def _serialize_time(self, value: time) -> str:
+        return value.strftime("%H:%M")
 
     @property
     def tz(self) -> ZoneInfo:

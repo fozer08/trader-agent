@@ -52,7 +52,13 @@ class BaseConfig(BaseModel):
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                yaml.dump(self.model_dump(), f, allow_unicode=True, default_flow_style=False)
+                yaml.safe_dump(
+                    self.model_dump(mode="json"),
+                    f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
             os.replace(tmp_path, path)
         except Exception:
             Path(tmp_path).unlink(missing_ok=True)
