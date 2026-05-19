@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -29,6 +30,15 @@ _log = get_logger(__name__)
 _MAX_SESSIONS = 100
 _runner_factory: _RunnerFactory | None = None
 _sessions: dict[str, AgentRunner] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_or_create_lock(session_id: str) -> asyncio.Lock:
+    lock = _session_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[session_id] = lock
+    return lock
 
 
 class _RunnerFactory:
@@ -84,11 +94,13 @@ async def lifespan(app: FastAPI):
     ) as provider:
         _runner_factory = _RunnerFactory(cfg, watchlist, provider, portfolio_repo)
         _sessions = {}
+        _session_locks.clear()
         try:
             yield
         finally:
             _runner_factory = None
             _sessions = {}
+            _session_locks.clear()
             engine.dispose()
 
 
@@ -117,34 +129,38 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     if _runner_factory is None:
         raise HTTPException(status_code=503, detail="Server not ready")
 
-    if req.session_id not in _sessions:
-        if len(_sessions) >= _MAX_SESSIONS:
-            oldest = next(iter(_sessions))
-            del _sessions[oldest]
-        _sessions[req.session_id] = _runner_factory.make(req.output_format)
-
-    runner = _sessions[req.session_id]
+    lock = _get_or_create_lock(req.session_id)
 
     async def event_stream():
-        try:
-            async for chunk in runner.chat(req.message):
-                if chunk.startswith("\x00TOOL:") and chunk.endswith("\x00"):
-                    event = {"type": "tool", "name": chunk[6:-1]}
-                else:
-                    event = {"type": "text", "content": chunk}
-                yield json.dumps(event, ensure_ascii=False) + "\n"
-        except Exception as exc:
-            _log.exception("chat stream failed")
-            err = {"type": "error", "message": str(exc) or type(exc).__name__}
-            yield json.dumps(err, ensure_ascii=False) + "\n"
+        async with lock:
+            if req.session_id not in _sessions:
+                if len(_sessions) >= _MAX_SESSIONS:
+                    oldest = next(iter(_sessions))
+                    del _sessions[oldest]
+                    _session_locks.pop(oldest, None)
+                _sessions[req.session_id] = _runner_factory.make(req.output_format)
+            runner = _sessions[req.session_id]
+            try:
+                async for chunk in runner.chat(req.message):
+                    if chunk.startswith("\x00TOOL:") and chunk.endswith("\x00"):
+                        event = {"type": "tool", "name": chunk[6:-1]}
+                    else:
+                        event = {"type": "text", "content": chunk}
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            except Exception as exc:
+                _log.exception("chat stream failed")
+                err = {"type": "error", "message": str(exc) or type(exc).__name__}
+                yield json.dumps(err, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @app.post("/v1/reset")
 async def reset(req: ResetRequest) -> dict:
-    if req.session_id in _sessions:
-        _sessions[req.session_id].reset()
+    lock = _get_or_create_lock(req.session_id)
+    async with lock:
+        if req.session_id in _sessions:
+            _sessions[req.session_id].reset()
     return {"ok": True}
 
 
