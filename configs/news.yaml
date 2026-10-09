@@ -1,0 +1,5 @@
+feeds:
+  - name: bloomberght
+    url: https://www.bloomberght.com/rss
+  - name: cnbce
+    url: https://www.cnbce.com/rss

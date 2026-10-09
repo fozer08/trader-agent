@@ -18,8 +18,7 @@ build/
 .pytest_cache/
 .claude/
 
-# Data & logs & configs
-configs/
+# Data & logs
 data/*.db
 data/kap_cache/
 logs/
@@ -27,3 +26,12 @@ logs/
 
 # OS
 .DS_Store
+
+# Web
+node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/test-results/
+web/playwright-report/
+
+AGENTS.md

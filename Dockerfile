@@ -28,4 +28,4 @@ ENV TRADER_CONFIGS_DIR=/app/configs \
     LOG_LEVEL=INFO
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["trader-agent", "telegram"]
+CMD ["trader-agent", "engine"]

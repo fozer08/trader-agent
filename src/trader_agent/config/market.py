@@ -2,56 +2,51 @@ from __future__ import annotations
 
 from datetime import time
 from pathlib import Path
-from typing import Annotated, ClassVar
-from zoneinfo import ZoneInfo
+from typing import ClassVar, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, BeforeValidator, Field, field_serializer
+from pydantic import BaseModel, Field, model_validator
 
-from ..market.base import TradingSession
+from ..utils.time import TimeField
 from .base import BaseConfig, data_dir
 
-
-def _parse_time(v: object) -> time:
-    if isinstance(v, time):
-        return v
-    if isinstance(v, str):
-        parts = v.split(":")
-        if len(parts) in {2, 3}:
-            second = int(parts[2]) if len(parts) == 3 else 0
-            return time(int(parts[0]), int(parts[1]), second)
-    raise ValueError(f"Cannot parse time: {v!r}")
-
-
-TimeField = Annotated[time, BeforeValidator(_parse_time)]
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 class ExchangeConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     name: str = "Borsa İstanbul"
-    code: str = "bist"
     mic: str = "XIST"
     timezone: str = "Europe/Istanbul"
     open: TimeField = time(10, 0)
     close: TimeField = time(18, 0)
+    daily_close: TimeField | None = None
+    weekdays: list[Weekday] = Field(default_factory=lambda: list(WEEKDAYS[:5]), min_length=1)
 
-    @field_serializer("open", "close")
-    def _serialize_time(self, value: time) -> str:
-        return value.strftime("%H:%M")
-
-    @property
-    def tz(self) -> ZoneInfo:
-        return ZoneInfo(self.timezone)
-
-    def trading_session(self) -> TradingSession:
-        return TradingSession(start=self.open, end=self.close, timezone=self.tz)
+    @model_validator(mode="after")
+    def validate_schedule(self) -> ExchangeConfig:
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Geçersiz timezone: {self.timezone}") from exc
+        if len(set(self.weekdays)) != len(self.weekdays):
+            raise ValueError("Çalışma günleri tekrarlı olamaz.")
+        if not self.open < self.close <= (self.daily_close or self.close):
+            raise ValueError("open < close <= daily_close olmalıdır.")
+        return self
 
 
 class MarketConfig(BaseConfig):
     CONFIG_FILENAME: ClassVar[str] = "market.yaml"
 
-    watchlist: str = "watchlist.json"
+    stocklist: str = "stocklist.json"
+    calendar: str = Field(default="calendar.json", min_length=1)
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
 
-    def watchlist_path(self) -> Path:
-        return data_dir() / self.watchlist
+    def stocklist_path(self) -> Path:
+        return data_dir() / self.stocklist
+
+    def calendar_path(self) -> Path:
+        return data_dir() / self.calendar

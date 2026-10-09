@@ -1,0 +1,4 @@
+agent_model: claude-sonnet-5-5
+light_model: claude-haiku-5-5
+max_output_tokens: 8192
+agent_effort: medium

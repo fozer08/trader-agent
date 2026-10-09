@@ -22,3 +22,7 @@ data/kap_cache/
 
 Dockerfile
 docker-compose.yml
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/

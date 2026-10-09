@@ -1,0 +1,274 @@
+{
+  "exchange": "XIST",
+  "covered_years": [
+    2025,
+    2026,
+    2027
+  ],
+  "days": [
+    {
+      "date": "2025-01-01",
+      "type": "closed",
+      "name": "Yılbaşı"
+    },
+    {
+      "date": "2025-03-29",
+      "type": "closed",
+      "name": "Ramazan Bayramı arifesi"
+    },
+    {
+      "date": "2025-03-30",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2025-03-31",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2025-04-01",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2025-04-23",
+      "type": "closed",
+      "name": "Ulusal Egemenlik ve Çocuk Bayramı"
+    },
+    {
+      "date": "2025-05-01",
+      "type": "closed",
+      "name": "Emek ve Dayanışma Günü"
+    },
+    {
+      "date": "2025-05-19",
+      "type": "closed",
+      "name": "Atatürk’ü Anma, Gençlik ve Spor Bayramı"
+    },
+    {
+      "date": "2025-06-05",
+      "type": "half_day",
+      "name": "Kurban Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2025-06-06",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2025-06-07",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2025-06-08",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2025-06-09",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2025-07-15",
+      "type": "closed",
+      "name": "Demokrasi ve Millî Birlik Günü"
+    },
+    {
+      "date": "2025-08-30",
+      "type": "closed",
+      "name": "Zafer Bayramı"
+    },
+    {
+      "date": "2025-10-28",
+      "type": "half_day",
+      "name": "Cumhuriyet Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2025-10-29",
+      "type": "closed",
+      "name": "Cumhuriyet Bayramı"
+    },
+    {
+      "date": "2026-01-01",
+      "type": "closed",
+      "name": "Yılbaşı"
+    },
+    {
+      "date": "2026-03-19",
+      "type": "half_day",
+      "name": "Ramazan Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2026-03-20",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2026-03-21",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2026-03-22",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2026-04-23",
+      "type": "closed",
+      "name": "Ulusal Egemenlik ve Çocuk Bayramı"
+    },
+    {
+      "date": "2026-05-01",
+      "type": "closed",
+      "name": "Emek ve Dayanışma Günü"
+    },
+    {
+      "date": "2026-05-19",
+      "type": "closed",
+      "name": "Atatürk’ü Anma, Gençlik ve Spor Bayramı"
+    },
+    {
+      "date": "2026-05-26",
+      "type": "half_day",
+      "name": "Kurban Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2026-05-27",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2026-05-28",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2026-05-29",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2026-05-30",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2026-07-15",
+      "type": "closed",
+      "name": "Demokrasi ve Millî Birlik Günü"
+    },
+    {
+      "date": "2026-08-30",
+      "type": "closed",
+      "name": "Zafer Bayramı"
+    },
+    {
+      "date": "2026-10-28",
+      "type": "half_day",
+      "name": "Cumhuriyet Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2026-10-29",
+      "type": "closed",
+      "name": "Cumhuriyet Bayramı"
+    },
+    {
+      "date": "2027-01-01",
+      "type": "closed",
+      "name": "Yılbaşı"
+    },
+    {
+      "date": "2027-03-08",
+      "type": "half_day",
+      "name": "Ramazan Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2027-03-09",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2027-03-10",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2027-03-11",
+      "type": "closed",
+      "name": "Ramazan Bayramı"
+    },
+    {
+      "date": "2027-04-23",
+      "type": "closed",
+      "name": "Ulusal Egemenlik ve Çocuk Bayramı"
+    },
+    {
+      "date": "2027-05-01",
+      "type": "closed",
+      "name": "Emek ve Dayanışma Günü"
+    },
+    {
+      "date": "2027-05-15",
+      "type": "closed",
+      "name": "Kurban Bayramı arifesi"
+    },
+    {
+      "date": "2027-05-16",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2027-05-17",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2027-05-18",
+      "type": "closed",
+      "name": "Kurban Bayramı"
+    },
+    {
+      "date": "2027-05-19",
+      "type": "closed",
+      "name": "Kurban Bayramı / Atatürk’ü Anma, Gençlik ve Spor Bayramı"
+    },
+    {
+      "date": "2027-07-15",
+      "type": "closed",
+      "name": "Demokrasi ve Millî Birlik Günü"
+    },
+    {
+      "date": "2027-08-30",
+      "type": "closed",
+      "name": "Zafer Bayramı"
+    },
+    {
+      "date": "2027-10-28",
+      "type": "half_day",
+      "name": "Cumhuriyet Bayramı arifesi",
+      "close": "12:30",
+      "daily_close": "12:40"
+    },
+    {
+      "date": "2027-10-29",
+      "type": "closed",
+      "name": "Cumhuriyet Bayramı"
+    }
+  ]
+}

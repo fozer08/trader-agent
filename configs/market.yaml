@@ -1,0 +1,10 @@
+stocklist: stocklist.json
+calendar: calendar.json
+exchange:
+  name: Borsa İstanbul
+  mic: XIST
+  timezone: Europe/Istanbul
+  open: '10:00'
+  close: '18:00'
+  daily_close: '18:10'
+  weekdays: [mon, tue, wed, thu, fri]

@@ -2,44 +2,52 @@ from __future__ import annotations
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from trader_agent.config.llm import LLMConfig
 
 
 def test_defaults(cfg_dir):
+    (cfg_dir / "llm.yaml").write_text("{}\n")
     config = LLMConfig.load()
-    assert config.provider == "anthropic"
-    assert config.agent_model == "claude-sonnet-4-6"
-    assert config.light_model == "claude-sonnet-4-6"
+    assert config.agent_model == "claude-sonnet-5-5"
+    assert config.light_model == "claude-haiku-5-5"
     assert config.max_output_tokens == 8192
-    assert config.use_extended_thinking is False
+    assert config.agent_effort == "medium"
+    assert config.turn_timeout == 180
 
 
 def test_yaml_overrides_defaults(cfg_dir):
-    (cfg_dir / "llm.yaml").write_text(yaml.dump({"max_output_tokens": 2048}))
+    path = cfg_dir / "llm.yaml"
+    content = yaml.dump({"max_output_tokens": 2048, "agent_effort": "high"})
+    path.write_text(content)
     config = LLMConfig.load()
     assert config.max_output_tokens == 2048
+    assert config.agent_effort == "high"
+    assert path.read_text() == content
 
 
-def test_update_saves_and_reloads(cfg_dir):
-    config = LLMConfig.load()
-    config.update(max_output_tokens=2048)
-    assert LLMConfig.load().max_output_tokens == 2048
-
-
-def test_api_key_from_env(cfg_dir, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    assert LLMConfig.load().api_key == "test-key"
-
-
-def test_api_key_not_persisted(cfg_dir, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    LLMConfig.load()
-    saved = yaml.safe_load((cfg_dir / "llm.yaml").read_text())
-    assert "api_key" not in saved
-
-
-def test_unknown_field_rejected(cfg_dir):
-    (cfg_dir / "llm.yaml").write_text(yaml.dump({"unknown_field": True}))
-    with pytest.raises(Exception):
+@pytest.mark.parametrize("field", ["api_key", "provider", "unknown_field"])
+def test_unknown_field_rejected(cfg_dir, field):
+    (cfg_dir / "llm.yaml").write_text(yaml.dump({field: "test-value"}))
+    with pytest.raises(ValidationError):
         LLMConfig.load()
+
+
+@pytest.mark.parametrize("max_output_tokens", [0, -1])
+def test_invalid_token_limit_rejected(cfg_dir, max_output_tokens):
+    (cfg_dir / "llm.yaml").write_text(yaml.dump({"max_output_tokens": max_output_tokens}))
+    with pytest.raises(ValidationError):
+        LLMConfig.load()
+
+
+@pytest.mark.parametrize("effort", ["max", "turbo", "", 5])
+def test_invalid_effort_rejected(effort):
+    with pytest.raises(ValidationError):
+        LLMConfig(agent_effort=effort)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_invalid_turn_timeout_rejected(timeout):
+    with pytest.raises(ValidationError):
+        LLMConfig(turn_timeout=timeout)

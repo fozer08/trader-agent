@@ -1,9 +1,53 @@
 services:
-  trader-agent:
+  engine:
     build: .
-    env_file: .env
+    image: trader-agent:local
+    command: ["trader-agent", "engine"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ENGINE_API_KEY: ${ENGINE_API_KEY:-}
+      ENGINE_HOST: 0.0.0.0
+      ENGINE_PORT: ${ENGINE_PORT:?ENGINE_PORT zorunlu}
+      ENGINE_URL: http://engine:${ENGINE_PORT:?ENGINE_PORT zorunlu}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./configs:/app/configs
       - ./data:/app/data
       - ./logs:/app/logs
+    ports:
+      - "127.0.0.1:${ENGINE_PORT:?ENGINE_PORT zorunlu}:${ENGINE_PORT:?ENGINE_PORT zorunlu}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import os
+          import urllib.request
+          urllib.request.urlopen(f"http://127.0.0.1:{os.environ['ENGINE_PORT']}/health", timeout=5)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    environment:
+      ENGINE_URL: http://engine:${ENGINE_PORT:?ENGINE_PORT zorunlu}
+      ENGINE_API_KEY: ${ENGINE_API_KEY:-}
+      WEB_PASSWORD: ${WEB_PASSWORD:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-}
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: ${WEB_PORT:?WEB_PORT zorunlu}
+    ports:
+      - "127.0.0.1:${WEB_PORT:?WEB_PORT zorunlu}:${WEB_PORT:?WEB_PORT zorunlu}"
+    depends_on:
+      engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + process.env.WEB_PORT + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
