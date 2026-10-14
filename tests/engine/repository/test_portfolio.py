@@ -1,372 +1,297 @@
-from __future__ import annotations
-
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from trader_agent.engine.repository.base import Base
-from trader_agent.engine.repository.portfolio import (
-    PortfolioRepository,
-    Position,
-    PositionTransactionORM,
-    _compute_state,
-)
+from trader_agent.engine.repository import create_db_engine, init_schema, create_session_factory
+from trader_agent.engine.repository.portfolio import PortfolioRepository
+from trader_agent.engine.repository.recommendations import RecommendationRepository
+
+NOW = datetime(2026, 10, 6, 12, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def repo() -> PortfolioRepository:
-    engine = create_engine("sqlite:///:memory:", future=True)
-    Base.metadata.create_all(engine)
-    session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-    return PortfolioRepository(session_factory)
-
-
-# ---- buy ---------------------------------------------------------------------
-
-def test_buy_new_symbol(repo):
-    position = repo.buy("THYAO", 100, 285.50)
-    assert position.symbol == "THYAO"
-    assert position.quantity == 100
-    assert position.avg_cost == pytest.approx(285.50)
-    assert position.stop_loss is None
-    assert position.target is None
-
-
-def test_buy_normalizes_symbol(repo):
-    position = repo.buy(" thyao ", 50, 100.0)
-    assert position.symbol == "THYAO"
-
-
-def test_buy_weighted_average(repo):
-    repo.buy("THYAO", 100, 10.0)
-    position = repo.buy("THYAO", 50, 13.0)
-    # (100*10 + 50*13) / 150 = 11
-    assert position.quantity == 150
-    assert position.avg_cost == pytest.approx(11.0)
-    assert position.quantity * position.avg_cost == pytest.approx(100 * 10 + 50 * 13)
-
-
-def test_buy_stores_levels(repo):
-    position = repo.buy("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
-    assert position.stop_loss == 90.0
-    assert position.target == 120.0
-
-
-def test_buy_preserves_levels_when_omitted(repo):
-    repo.buy("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
-    position = repo.buy("THYAO", 50, 105.0)
-    assert position.stop_loss == 90.0
-    assert position.target == 120.0
-
-
-def test_buy_overwrites_levels_when_given(repo):
-    repo.buy("THYAO", 100, 100.0, stop_loss=90.0)
-    position = repo.buy("THYAO", 50, 105.0, stop_loss=95.0, target=120.0)
-    assert position.stop_loss == 95.0
-    assert position.target == 120.0
-
-
-def test_buy_rejects_zero_quantity(repo):
-    with pytest.raises(ValueError, match="quantity"):
-        repo.buy("THYAO", 0, 100.0)
-
-
-def test_buy_rejects_negative_quantity(repo):
-    with pytest.raises(ValueError, match="quantity"):
-        repo.buy("THYAO", -10, 100.0)
-
-
-def test_buy_rejects_non_integer_quantity(repo):
-    with pytest.raises(ValueError, match="integer"):
-        repo.buy("THYAO", 10.5, 100.0)  # type: ignore[arg-type]
-
-
-def test_buy_rejects_zero_price(repo):
-    with pytest.raises(ValueError, match="price"):
-        repo.buy("THYAO", 10, 0.0)
-
-
-def test_buy_rejects_empty_symbol(repo):
-    with pytest.raises(ValueError, match="symbol"):
-        repo.buy("   ", 10, 100.0)
-
-
-# ---- sell --------------------------------------------------------------------
-
-def test_sell_partial_keeps_position(repo):
-    repo.buy("THYAO", 100, 10.0)
-    position = repo.sell("THYAO", 30, 12.0)
-    assert position is not None
-    assert position.quantity == 70
-    assert position.avg_cost == pytest.approx(10.0)  # SELL avg'i değiştirmez
-    assert position.realized_pnl == pytest.approx(30 * (12.0 - 10.0))
-
-
-def test_sell_full_closes_and_preserves_transactions(repo):
-    repo.buy("THYAO", 100, 10.0)
-    result = repo.sell("THYAO", 100, 12.0)
-    assert result is None  # kapandı
-    assert repo.get("THYAO") is None
-
-    closed = repo.list_closed()
-    assert len(closed) == 1
-    assert closed[0].symbol == "THYAO"
-    assert closed[0].quantity == 100
-    assert closed[0].realized_pnl == pytest.approx(200.0)
-    assert [tx.kind for tx in repo.transactions("THYAO")] == ["BUY", "SELL"]
-
-
-def test_sell_more_than_available_raises(repo):
-    repo.buy("THYAO", 100, 10.0)
-    with pytest.raises(ValueError, match="Insufficient"):
-        repo.sell("THYAO", 150, 12.0)
-
-
-def test_sell_missing_position_raises(repo):
-    with pytest.raises(KeyError):
-        repo.sell("THYAO", 10, 12.0)
-
-
-def test_sell_partial_then_full_combines_transactions(repo):
-    repo.buy("THYAO", 100, 10.0)
-    repo.sell("THYAO", 40, 11.0)
-    result = repo.sell("THYAO", 60, 12.0)
-    assert result is None
-
-    closed = repo.list_closed()
-    assert len(closed) == 1
-    c = closed[0]
-    # invested = 100 * 10 = 1000; received = 40*11 + 60*12 = 1160
-    assert c.total_invested == pytest.approx(1000.0)
-    assert c.total_received == pytest.approx(1160.0)
-    assert c.realized_pnl == pytest.approx(160.0)
-
-
-# ---- set_levels --------------------------------------------------------------
-
-def test_set_levels_updates_stop_only(repo):
-    repo.buy("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
-    position = repo.set_levels("THYAO", stop_loss=95.0)
-    assert position.stop_loss == 95.0
-    assert position.target == 120.0
-
-
-def test_set_levels_requires_at_least_one(repo):
-    repo.buy("THYAO", 100, 100.0)
-    with pytest.raises(ValueError):
-        repo.set_levels("THYAO")
-
-
-def test_set_levels_missing_position_raises(repo):
-    with pytest.raises(KeyError):
-        repo.set_levels("THYAO", stop_loss=10.0)
-
-
-def test_set_levels_adds_to_position_without_levels(repo):
-    repo.buy("THYAO", 100, 100.0)  # no levels
-    position = repo.set_levels("THYAO", stop_loss=90.0, target=120.0)
-    assert position.stop_loss == 90.0
-    assert position.target == 120.0
-
-
-# ---- remove / clear ----------------------------------------------------------
-
-def test_remove_existing_returns_true_no_archive(repo):
-    repo.buy("THYAO", 10, 100.0)
-    assert repo.remove("THYAO") is True
-    assert repo.list() == []
-    assert repo.list_closed() == []  # arşivlenmez
-
-
-def test_remove_missing_returns_false(repo):
-    assert repo.remove("THYAO") is False
-
-
-def test_clear_returns_count_no_archive(repo):
-    repo.buy("THYAO", 10, 100.0)
-    repo.buy("AKBNK", 20, 50.0)
-    assert repo.clear() == 2
-    assert repo.list() == []
-    assert repo.list_closed() == []
-
-
-# ---- list / get / transactions -----------------------------------------------
-
-def test_list_sorted_by_symbol(repo):
-    repo.buy("THYAO", 10, 100.0)
-    repo.buy("AKBNK", 20, 50.0)
-    repo.buy("GARAN", 30, 75.0)
-    symbols = [p.symbol for p in repo.list()]
-    assert symbols == ["AKBNK", "GARAN", "THYAO"]
-
-
-def test_get_returns_aggregated(repo):
-    repo.buy("THYAO", 100, 10.0)
-    repo.buy("THYAO", 100, 14.0)
-    position = repo.get("THYAO")
-    assert position is not None
-    assert position.quantity == 200
-    assert position.avg_cost == pytest.approx(12.0)
-
-
-def test_get_missing_returns_none(repo):
-    assert repo.get("THYAO") is None
-
-
-def test_transactions_returns_in_order(repo):
-    repo.buy("THYAO", 100, 10.0)
-    repo.sell("THYAO", 30, 11.0)
-    repo.buy("THYAO", 50, 12.0)
-    txs = repo.transactions("THYAO")
-    assert [t.kind for t in txs] == ["BUY", "SELL", "BUY"]
-    assert [t.quantity for t in txs] == [100, 30, 50]
-
-
-# ---- list_closed -------------------------------------------------------------
-
-def test_list_closed_filters_by_symbol(repo):
-    repo.buy("THYAO", 10, 100.0)
-    repo.sell("THYAO", 10, 110.0)
-    repo.buy("AKBNK", 20, 50.0)
-    repo.sell("AKBNK", 20, 55.0)
-
-    only_thyao = repo.list_closed(symbol="THYAO")
-    assert len(only_thyao) == 1
-    assert only_thyao[0].symbol == "THYAO"
-
-
-def test_list_closed_filters_by_since(repo):
-    repo.buy("THYAO", 10, 100.0)
-    repo.sell("THYAO", 10, 110.0)
-    # Hemen sonrasını filtrelersek hâlâ görünmeli (kapanış anlık)
-    future = datetime.now(timezone.utc) + timedelta(minutes=1)
-    assert repo.list_closed(since=future) == []
-
-
-# ---- compute helpers (algorithm) ---------------------------------------------
-
-def _tx(kind: str, quantity: int, price: float, day: int) -> PositionTransactionORM:
-    """Test helper: günü ay 5'in `day`'i olarak ayarlar."""
-    return PositionTransactionORM(
-        id=day,
-        symbol="X",
-        kind=kind,
-        quantity=quantity,
-        price=price,
-        created_at=datetime(2026, 5, day, 12, 0, tzinfo=timezone.utc),
+def stores(tmp_path):
+    engine = create_db_engine(tmp_path / "portfolio.db")
+    init_schema(engine)
+    factory = create_session_factory(engine)
+    clock = [NOW]
+    repo = PortfolioRepository(factory, "alice", lambda: clock[0])
+    recs = RecommendationRepository(factory, "alice")
+    yield repo, recs, clock, factory
+    engine.dispose()
+
+
+def recommendation(recs, **values):
+    return recs.publish(
+        **dict(
+            symbol="THYAO",
+            entry_min=100.0,
+            entry_max=105.0,
+            stop_loss=95.0,
+            target=120.0,
+            horizon="swing",
+            rationale="Trend takibi",
+            risk_level="moderate",
+            producer="assistant",
+            producer_version="test-v1",
+            at=NOW,
+            expires_at=NOW + timedelta(hours=9),
+            data_as_of=NOW - timedelta(minutes=15),
+            **values,
+        )
     )
 
 
-def test_state_avg_cost_method():
-    """BUY weighted-average, SELL avg'i değiştirmez."""
-    txs = [
-        _tx("BUY", 100, 10.0, 1),
-        _tx("BUY", 100, 14.0, 2),
-        _tx("SELL", 50, 15.0, 3),
-    ]
-    state = _compute_state(txs)
-    assert state.net_qty == 150
-    assert state.total_bought == 200
-    assert state.avg_cost == pytest.approx(12.0)
-    assert state.total_invested == pytest.approx(2400.0)
-    assert state.total_received == pytest.approx(50 * 15.0)
-    assert state.realized_pnl == pytest.approx(50 * (15.0 - 12.0))
+@pytest.mark.parametrize("horizon", ["intraday", "swing", "position"])
+def test_independent_positions_and_explicit_additions(stores, horizon):
+    repo, _, _, _ = stores
+    first = repo.buy(" thyao ", 100, 10, horizon=horizon)
+    second = repo.buy("THYAO", 50, 13, horizon="position")
+    assert first.id != second.id
+    assert len(repo.list()) == 2
+    added = repo.buy("THYAO", 50, 13, position_id=first.id)
+    assert added.quantity == 150 and added.avg_cost == 11
+    assert added.horizon == horizon
+    with pytest.raises(ValueError, match="mevcut vadeyi"):
+        repo.buy(
+            "THYAO",
+            1,
+            10,
+            position_id=first.id,
+            horizon="intraday" if horizon != "intraday" else "swing",
+        )
+    assert repo.get(second.id).quantity == 50
+    assert [t.quantity for t in repo.transactions(first.id)] == [100, 50]
 
 
-# ---- ClosedPosition computed properties --------------------------------------
-
-def test_closed_position_computed_properties(repo):
-    repo.buy("THYAO", 100, 10.0)
-    repo.sell("THYAO", 100, 12.0)
-    c = repo.list_closed()[0]
-    assert c.realized_pnl == pytest.approx(200.0)
-    assert c.realized_pnl_pct == pytest.approx(20.0)
-    assert c.avg_buy_cost == pytest.approx(10.0)
-    assert c.avg_sell_price == pytest.approx(12.0)
-    assert c.hold_days >= 1
-
-
-# ---- Position type check -----------------------------------------------------
-
-def test_list_returns_position_dtos(repo):
-    repo.buy("THYAO", 10, 100.0)
-    positions = repo.list()
-    assert len(positions) == 1
-    assert isinstance(positions[0], Position)
-
-
-def test_reopen_starts_new_cost_basis_and_preserves_closed_history(repo):
-    repo.buy("THYAO", 100, 10.0, stop_loss=9.0, target=12.0, note="İlk pozisyon")
-    repo.sell("THYAO", 100, 12.0)
-    position = repo.buy("THYAO", 20, 30.0)
-
-    assert position.quantity == 20
-    assert position.avg_cost == pytest.approx(30.0)
-    assert position.realized_pnl == 0.0
-    assert position.stop_loss is None
-    assert position.target is None
-    assert position.note == ""
-    assert len(repo.transactions("THYAO")) == 3
-    assert repo.list_closed()[0].realized_pnl == pytest.approx(200.0)
-
-
-def test_multiple_cycles_and_partial_sales_are_calculated_separately(repo):
-    repo.buy("THYAO", 100, 10.0)
-    repo.sell("THYAO", 40, 12.0)
-    repo.buy("THYAO", 40, 15.0)  # Yeni ortalama: (60*10 + 40*15) / 100 = 12
-    repo.sell("THYAO", 100, 13.0)
-    repo.buy("THYAO", 10, 20.0)
-    repo.sell("THYAO", 10, 18.0)
-
-    closed = repo.list_closed(symbol=" thyao ")
-    assert [item.realized_pnl for item in closed] == pytest.approx([-20.0, 180.0])
-    assert [item.quantity for item in closed] == [10, 140]
-    assert len(repo.transactions("THYAO")) == 6
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(quantity=0),
+        dict(quantity=-1),
+        dict(quantity=True),
+        dict(quantity=1.2),
+        dict(price=0),
+        dict(price=float("nan")),
+        dict(price=float("inf")),
+        dict(horizon=None),
+        dict(horizon="forever"),
+        dict(note="x" * 401),
+        dict(symbol=""),
+        dict(stop_loss=-1),
+        dict(target=0),
+        dict(stop_loss=110, target=100),
+    ],
+)
+def test_invalid_manual_input_writes_nothing(stores, kwargs):
+    repo, _, _, _ = stores
+    args = dict(symbol="THYAO", quantity=10, price=100, horizon="swing")
+    args.update(kwargs)
+    with pytest.raises(ValueError):
+        repo.buy(**args)
     assert repo.list() == []
 
 
-@pytest.mark.parametrize("operation", ["remove", "clear"])
-def test_clearing_active_position_preserves_previous_cycles(repo, operation):
-    repo.buy("THYAO", 10, 10.0)
-    repo.sell("THYAO", 10, 12.0)
-    repo.buy("THYAO", 20, 30.0)
-
-    if operation == "remove":
-        assert repo.remove("THYAO") is True
-    else:
-        assert repo.clear() == 1
-
-    assert repo.get("THYAO") is None
-    assert [tx.kind for tx in repo.transactions("THYAO")] == ["BUY", "SELL"]
-    assert repo.list_closed()[0].realized_pnl == pytest.approx(20.0)
-
-
-def test_plan_note_can_be_updated_and_cleared_without_changing_trades(repo):
-    repo.buy("THYAO", 100, 10.0, stop_loss=9.0, target=12.0, note="Destek takibi")
-    repo.buy("THYAO", 10, 11.0)
-    assert repo.get("THYAO").note == "Destek takibi"
-
-    position = repo.set_levels("THYAO", note="Koşul değişti")
-    assert position.note == "Koşul değişti"
-    assert position.stop_loss == 9.0
-    assert position.target == 12.0
-    assert len(repo.transactions("THYAO")) == 2
-    assert repo.set_levels("THYAO", note="").note == ""
-
-
-def test_invalid_note_does_not_create_a_trade(repo):
-    with pytest.raises(ValueError, match="note"):
-        repo.buy("THYAO", 100, 10.0, note="x" * 401)
+def test_partial_full_close_average_cost_and_reopening(stores):
+    repo, _, clock, _ = stores
+    p = repo.buy("THYAO", 100, 10, horizon="swing", opened_at=NOW - timedelta(days=2))
+    repo.sell(p.id, 40, 12)
+    repo.buy("THYAO", 40, 15, position_id=p.id)
+    assert repo.get(p.id).avg_cost == 12
+    clock[0] += timedelta(days=1)
+    assert repo.sell(p.id, 100, 13) is None
     assert repo.list() == []
-    assert repo.transactions("THYAO") == []
+    closed = repo.list_closed()[0]
+    assert closed.realized_pnl == 180
+    assert closed.quantity == 140 and closed.total_invested == 1600
+    assert closed.hold_days == 4
+    assert repo.get(p.id).closed_at is not None
+    newer = repo.buy("THYAO", 10, 20, horizon="position")
+    repo.sell(newer.id, 10, 18)
+    assert newer.id != p.id
+    assert repo.performance()["realized_pnl"] == 160
+    assert len(repo.transactions(p.id)) == 4
+    assert len(repo.transactions(newer.id)) == 2
 
 
-def test_history_survives_repository_restart(repo):
-    repo.buy("THYAO", 10, 10.0)
-    repo.sell("THYAO", 10, 12.0)
-    restarted = PortfolioRepository(repo._session_factory)
-    assert restarted.list() == []
-    assert len(restarted.transactions("THYAO")) == 2
-    assert restarted.list_closed()[0].realized_pnl == pytest.approx(20.0)
+def test_oversell_and_unknown_ids_preserve_history(stores):
+    repo, _, _, _ = stores
+    p = repo.buy("THYAO", 10, 100, horizon="swing")
+    with pytest.raises(ValueError, match="fazla"):
+        repo.sell(p.id, 11, 110)
+    with pytest.raises(KeyError):
+        repo.sell("missing", 1, 100)
+    assert len(repo.transactions(p.id)) == 1
+    assert repo.get(p.id).quantity == 10
+
+
+def test_plan_revisions_preserve_initial_conditions(stores):
+    repo, recs, _, _ = stores
+    r = recommendation(recs)
+    p = repo.accept(r.id, 10, 102)
+    repo.set_levels(p.id, stop_loss=99, horizon="position", note="Yeni plan")
+    repo.set_levels(p.id, note="")
+    changed = repo.get(p.id)
+    assert changed.initial_plan["stop_loss"] == 95
+    assert changed.initial_plan["horizon"] == "swing"
+    assert changed.source == "system" and changed.plan_changed and changed.note == ""
+    assert [p["note"] for p in repo.plans(p.id)] == ["Yeni plan", ""]
+    assert len(repo.transactions(p.id)) == 1
+    with pytest.raises(ValueError):
+        repo.set_levels(p.id, stop_loss=130)
+    assert repo.get(p.id).stop_loss == 99
+    assert len(repo.plans(p.id)) == 2
+
+
+def test_suggestion_and_manual_same_symbol_never_merge(stores):
+    repo, recs, _, _ = stores
+    r = recommendation(recs)
+    manual = repo.buy("THYAO", 20, 110, horizon="position")
+    system = repo.accept(r.id, 10, 102)
+    assert len(repo.list()) == 2
+    assert repo.list(source="manual")[0].id == manual.id
+    assert repo.list(source="system")[0].id == system.id
+    assert system.initial_plan["entry_min"] == 100
+    assert recs.get(r.id, NOW).position_id == system.id
+    repo.sell(manual.id, 20, 100)
+    repo.sell(system.id, 10, 110)
+    assert repo.performance("manual")["realized_pnl"] == -200
+    assert repo.performance("system")["realized_pnl"] == 80
+    assert repo.performance()["realized_pnl"] == -120
+
+
+@pytest.mark.parametrize("price", [99.99, 105.01])
+def test_range_is_enforced_for_conversion_and_addition(stores, price):
+    repo, recs, _, _ = stores
+    r = recommendation(recs)
+    with pytest.raises(ValueError, match="aralığında"):
+        repo.accept(r.id, 10, price)
+    assert repo.list() == []
+    p = repo.accept(r.id, 10, 100)
+    with pytest.raises(ValueError, match="aralığında"):
+        repo.buy("THYAO", 10, price, position_id=p.id)
+    assert repo.get(p.id).quantity == 10
+
+
+def test_expiry_hides_recommendation_but_never_closes_position(stores):
+    repo, recs, clock, _ = stores
+    r = recommendation(recs)
+    p = repo.accept(r.id, 10, 105)
+    clock[0] = r.expires_at
+    assert recs.list(clock[0]) == []
+    assert not recs.get(r.id, clock[0]).active
+    assert repo.get(p.id).quantity == 10
+    with pytest.raises(ValueError, match="süresi"):
+        repo.buy("THYAO", 1, 102, position_id=p.id)
+    repo.sell(p.id, 10, 110)
+    assert repo.list_closed()[0].source == "system"
+
+
+def test_expired_conversion_and_changed_idempotency_request_are_rejected(stores):
+    repo, recs, clock, _ = stores
+    r = recommendation(recs)
+    p = repo.accept(r.id, 10, 102, "request-1")
+    clock[0] = r.expires_at
+    assert repo.accept(r.id, 10, 102, "request-1").id == p.id
+    with pytest.raises(ValueError, match="farklı"):
+        repo.accept(r.id, 20, 102, "request-1")
+    with pytest.raises(ValueError, match="zaten"):
+        repo.accept(r.id, 10, 102, "request-2")
+    other = RecommendationRepository(repo._session_factory, "other")
+    r2 = recommendation(other)
+    other_portfolio = PortfolioRepository(repo._session_factory, "other", lambda: clock[0])
+    with pytest.raises(ValueError, match="süresi"):
+        other_portfolio.accept(r2.id, 10, 102)
+
+
+def test_parallel_accept_is_atomic_and_retry_does_not_duplicate(stores):
+    repo, recs, _, _ = stores
+    r = recommendation(recs)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        positions = list(pool.map(lambda _: repo.accept(r.id, 10, 102, "one"), range(2)))
+    assert positions[0].id == positions[1].id
+    assert len(repo.list()) == len(repo.transactions(positions[0].id)) == 1
+
+
+def test_manual_and_close_retries_are_idempotent(stores):
+    repo, _, _, _ = stores
+    p = repo.buy("THYAO", 10, 100, horizon="swing", operation_id="buy")
+    assert repo.buy("THYAO", 10, 100, horizon="swing", operation_id="buy").id == p.id
+    repo.sell(p.id, 10, 120, operation_id="close")
+    assert repo.sell(p.id, 10, 120, operation_id="close") is None
+    assert len(repo.transactions(p.id)) == 2
+
+
+def test_cross_user_reads_and_writes_fail(stores):
+    repo, recs, _, factory = stores
+    other = PortfolioRepository(factory, "bob", lambda: NOW)
+    r = recommendation(recs)
+    p = repo.accept(r.id, 10, 102)
+    assert other.get(p.id) is None
+    for call in [
+        lambda: other.transactions(p.id),
+        lambda: other.plans(p.id),
+        lambda: other.sell(p.id, 1, 100),
+        lambda: other.accept(r.id, 10, 102),
+        lambda: other.set_levels(p.id, target=130),
+    ]:
+        with pytest.raises(KeyError):
+            call()
+    assert other.remove(p.id) is False
+    assert other.performance()["realized_pnl"] == 0
+
+
+def test_performance_period_uses_partial_close_time_and_counts_only_full_closes(stores):
+    repo, _, clock, _ = stores
+    p = repo.buy("THYAO", 10, 100, horizon="swing")
+    repo.sell(p.id, 2, 120)
+    assert repo.performance()["realized_pnl"] == 40
+    assert repo.performance()["closed_count"] == 0
+    assert repo.performance()["win_rate"] is None
+    clock[0] += timedelta(days=10)
+    repo.sell(p.id, 8, 90)
+    period = repo.performance(since=NOW + timedelta(days=1))
+    assert period["realized_pnl"] == -80 and period["released_cost"] == 800
+    assert period["realized_return_pct"] == -10
+    assert period["closed_count"] == period["losses"] == 1
+    assert period["average_hold_days"] is None
+    assert repo.performance()["realized_pnl"] == -40
+    assert repo.performance(until=NOW + timedelta(days=1))["realized_pnl"] == 40
+
+
+def test_voiding_open_records_does_not_erase_closed_history(stores):
+    repo, _, _, factory = stores
+    p = repo.buy("THYAO", 10, 100, horizon="swing")
+    repo.sell(p.id, 10, 120)
+    newer = repo.buy("THYAO", 10, 100, horizon="swing")
+    repo.sell(newer.id, 1, 110)
+    assert repo.remove(newer.id)
+    assert not repo.remove(newer.id)
+    assert repo.get(newer.id) is None
+    assert repo.performance()["realized_pnl"] == 200
+    restarted = PortfolioRepository(factory, "alice")
+    assert len(restarted.list_closed()) == 1
+    assert len(restarted.transactions(p.id)) == 2
+
+
+def test_date_validation_and_unknown_date(stores):
+    repo, _, _, _ = stores
+    assert repo.buy("THYAO", 10, 100, horizon="swing").opened_at is None
+    for opened_at in [NOW + timedelta(days=1), NOW.replace(tzinfo=None)]:
+        with pytest.raises(ValueError):
+            repo.buy("THYAO", 10, 100, horizon="swing", opened_at=opened_at)
+    assert len(repo.list()) == 1
+
+
+def test_performance_period_uses_instants_across_timezone_offsets(stores):
+    repo, _, _, _ = stores
+    position = repo.buy("THYAO", 10, 100, horizon="swing")
+    repo.sell(position.id, 10, 110)
+    local_start = (NOW - timedelta(minutes=1)).astimezone(timezone(timedelta(hours=3)))
+    local_end = (NOW + timedelta(minutes=1)).astimezone(timezone(timedelta(hours=3)))
+    result = repo.performance(since=local_start, until=local_end)
+    assert result["realized_pnl"] == 100
+    assert result["closed_count"] == 1
+    assert repo.performance(until=local_start)["closed_count"] == 0
+    assert repo.performance(since=local_end)["realized_pnl"] == 0

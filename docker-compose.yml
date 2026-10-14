@@ -5,7 +5,7 @@ services:
     command: ["trader-agent", "engine"]
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ENGINE_API_KEY: ${ENGINE_API_KEY:-}
+      ENGINE_API_KEY: ${ENGINE_API_KEY:?ENGINE_API_KEY zorunlu}
       ENGINE_HOST: 0.0.0.0
       ENGINE_PORT: ${ENGINE_PORT:?ENGINE_PORT zorunlu}
       ENGINE_URL: http://engine:${ENGINE_PORT:?ENGINE_PORT zorunlu}
@@ -31,23 +31,28 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  web:
-    build: ./web
+  userui:
+    build: ./userui
     environment:
       ENGINE_URL: http://engine:${ENGINE_PORT:?ENGINE_PORT zorunlu}
-      ENGINE_API_KEY: ${ENGINE_API_KEY:-}
-      WEB_PASSWORD: ${WEB_PASSWORD:-}
-      WEB_ORIGIN: ${WEB_ORIGIN:-}
-      WEB_HOST: 0.0.0.0
-      WEB_PORT: ${WEB_PORT:?WEB_PORT zorunlu}
+      ENGINE_API_KEY: ${ENGINE_API_KEY:?ENGINE_API_KEY zorunlu}
+      USERUI_DATABASE_PATH: /app/data/web.db
+      USERUI_ORIGIN: ${USERUI_ORIGIN:-}
+      USERUI_HOST: 0.0.0.0
+      USERUI_PORT: ${USERUI_PORT:?USERUI_PORT zorunlu}
     ports:
-      - "127.0.0.1:${WEB_PORT:?WEB_PORT zorunlu}:${WEB_PORT:?WEB_PORT zorunlu}"
+      - "127.0.0.1:${USERUI_PORT:?USERUI_PORT zorunlu}:${USERUI_PORT:?USERUI_PORT zorunlu}"
+    volumes:
+      - web-data:/app/data
     depends_on:
       engine:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + process.env.WEB_PORT + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + process.env.USERUI_PORT + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  web-data:

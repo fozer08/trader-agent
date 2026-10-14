@@ -2,16 +2,16 @@
 
 from .core import (
     CalendarCoverageError,
-    DaySchedule,
     ExchangeSchedule,
     TradingCalendar,
+    TradingDay,
     TradingSession,
 )
 
 __all__ = [
     "CalendarCoverageError",
-    "DaySchedule",
     "ExchangeSchedule",
     "TradingCalendar",
+    "TradingDay",
     "TradingSession",
 ]

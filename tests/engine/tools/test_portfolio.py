@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from trader_agent.engine.marketdata.types import OHLCV, PriceQuote, SessionSnapshot
 from trader_agent.engine.repository.base import Base
@@ -43,7 +44,7 @@ class _MockMarket:
 
 
 def _make_tools(prices: dict[str, float] | None = None) -> PortfolioTools:
-    engine = create_engine("sqlite:///:memory:", future=True)
+    engine = create_engine("sqlite:///:memory:", future=True, poolclass=StaticPool, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     return PortfolioTools(
@@ -60,48 +61,49 @@ def tools() -> PortfolioTools:
 # ---- buy_position ------------------------------------------------------------
 
 async def test_buy_position_new_symbol(tools):
-    result = await tools.buy_position("THYAO", 100, 285.50)
+    result = await tools.buy_position("THYAO", 100, 285.50, horizon="swing")
     pos = result["position"]
     assert pos["symbol"] == "THYAO"
     assert pos["quantity"] == 100
     assert pos["avg_cost"] == 285.50
     assert "opened_at" in pos
-    assert pos["hold_days"] >= 1
+    assert pos["hold_days"] is None
 
 
 async def test_buy_position_with_levels(tools):
-    result = await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0, target=110.0)
+    result = await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0, target=110.0, horizon="swing")
     pos = result["position"]
     assert pos["stop_loss"] == 95.0
     assert pos["target"] == 110.0
 
 
 async def test_position_note_is_available_and_editable(tools):
-    result = await tools.buy_position("THYAO", 10, 100.0, note="Kapanışta değerlendir")
+    result = await tools.buy_position("THYAO", 10, 100.0, note="Kapanışta değerlendir", horizon="swing")
     assert result["position"]["note"] == "Kapanışta değerlendir"
-    result = await tools.set_levels("THYAO", note="Hedefe ulaşınca çıkış")
+    result = await tools.set_levels(_position_id(tools, "THYAO"), note="Hedefe ulaşınca çıkış")
     assert result["position"]["note"] == "Hedefe ulaşınca çıkış"
     assert result["position"]["quantity"] == 10
 
 
 async def test_portfolio_output_contains_only_basic_position_fields(tools):
-    await tools.buy_position("THYAO", 10, 100.0)
+    await tools.buy_position("THYAO", 10, 100.0, horizon="swing")
     result = await tools.list_portfolio()
     assert set(result["positions"][0]) == {
+        "id", "source", "producer", "recommendation_id", "initial_plan", "plan_changed", "created_at", "closed_at",
         "symbol", "quantity", "avg_cost", "opened_at", "hold_days", "realized_pnl",
-        "stop_loss", "target", "note", "current_price", "as_of", "price_kind", "session_date",
+        "stop_loss", "target", "note", "horizon", "current_price", "as_of", "price_kind", "session_date",
     }
 
 
 async def test_buy_position_weighted_average(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    result = await tools.buy_position("THYAO", 50, 13.0)
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    result = await tools.buy_position("THYAO", 50, 13.0, position_id=_position_id(tools, "THYAO"))
     assert result["position"]["quantity"] == 150
     assert result["position"]["avg_cost"] == pytest.approx(11.0)
 
 
 async def test_buy_position_invalid_returns_error(tools):
-    result = await tools.buy_position("THYAO", 0, 100.0)
+    result = await tools.buy_position("THYAO", 0, 100.0, horizon="swing")
     assert "error" in result
 
 
@@ -109,32 +111,32 @@ async def test_buy_position_invalid_returns_error(tools):
 @pytest.mark.parametrize("field", ["price", "stop_loss", "target"])
 async def test_invalid_buy_price_does_not_create_position_or_history(tools, field, value):
     args = {"symbol": "THYAO", "quantity": 1, "price": 100.0, field: value}
-    result = await tools.buy_position(**args)
+    result = await tools.buy_position(**args, horizon="swing")
     assert "error" in result
     assert field in result["error"]
     assert (await tools.list_portfolio())["positions"] == []
-    assert "error" in await tools.get_position_tx("THYAO")
+    assert "error" in await tools.get_position_tx(_position_id(tools, "THYAO"))
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), True, "100"])
 @pytest.mark.parametrize("operation", ["sell", "stop_loss", "target"])
 async def test_invalid_price_preserves_existing_position_and_transactions(tools, operation, value):
-    original = (await tools.buy_position("THYAO", 2, 100.0, 90.0, 120.0))["position"]
+    original = (await tools.buy_position("THYAO", 2, 100.0, 90.0, 120.0, horizon="swing"))["position"]
     if operation == "sell":
-        result = await tools.sell_position("THYAO", 1, value)
+        result = await tools.sell_position(_position_id(tools, "THYAO"), 1, value)
     else:
-        result = await tools.set_levels("THYAO", **{operation: value})
+        result = await tools.set_levels(_position_id(tools, "THYAO"), **{operation: value})
     assert "error" in result
     position = (await tools.list_portfolio())["positions"][0]
     assert all(position[key] == value for key, value in original.items())
-    assert len((await tools.get_position_tx("THYAO"))["transactions"]) == 1
+    assert len((await tools.get_position_tx(_position_id(tools, "THYAO")))["transactions"]) == 1
 
 
 # ---- sell_position -----------------------------------------------------------
 
 async def test_sell_position_partial(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    result = await tools.sell_position("THYAO", 30, 12.0)
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    result = await tools.sell_position(_position_id(tools, "THYAO"), 30, 12.0)
     assert result["closed"] is False
     pos = result["position"]
     assert pos["quantity"] == 70
@@ -142,20 +144,20 @@ async def test_sell_position_partial(tools):
 
 
 async def test_sell_position_full_returns_summary(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    result = await tools.sell_position("THYAO", 100, 12.0)
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    result = await tools.sell_position(_position_id(tools, "THYAO"), 100, 12.0)
     assert result["closed"] is True
     archived = result["archived"]
     assert archived["symbol"] == "THYAO"
     assert archived["realized_pnl"] == pytest.approx(200.0)
     assert archived["avg_buy_cost"] == pytest.approx(10.0)
-    history = await tools.get_position_tx("THYAO")
+    history = await tools.get_position_tx(_position_id(tools, "THYAO"))
     assert [tx["kind"] for tx in history["transactions"]] == ["BUY", "SELL"]
 
 
 async def test_sell_position_too_many(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    result = await tools.sell_position("THYAO", 150, 12.0)
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    result = await tools.sell_position(_position_id(tools, "THYAO"), 150, 12.0)
     assert "error" in result
 
 
@@ -167,15 +169,15 @@ async def test_sell_position_missing(tools):
 # ---- set_levels --------------------------------------------------------------
 
 async def test_set_levels_updates_stop(tools):
-    await tools.buy_position("THYAO", 100, 100.0, stop_loss=90.0, target=120.0)
-    result = await tools.set_levels("THYAO", stop_loss=95.0)
+    await tools.buy_position("THYAO", 100, 100.0, stop_loss=90.0, target=120.0, horizon="swing")
+    result = await tools.set_levels(_position_id(tools, "THYAO"), stop_loss=95.0)
     assert result["position"]["stop_loss"] == 95.0
     assert result["position"]["target"] == 120.0
 
 
 async def test_set_levels_adds_to_position_without_levels(tools):
-    await tools.buy_position("THYAO", 100, 100.0)
-    result = await tools.set_levels("THYAO", stop_loss=90.0, target=120.0)
+    await tools.buy_position("THYAO", 100, 100.0, horizon="swing")
+    result = await tools.set_levels(_position_id(tools, "THYAO"), stop_loss=90.0, target=120.0)
     assert result["position"]["stop_loss"] == 90.0
     assert result["position"]["target"] == 120.0
 
@@ -186,27 +188,27 @@ async def test_set_levels_missing(tools):
 
 
 async def test_set_levels_requires_at_least_one(tools):
-    await tools.buy_position("THYAO", 100, 100.0)
-    result = await tools.set_levels("THYAO")
+    await tools.buy_position("THYAO", 100, 100.0, horizon="swing")
+    result = await tools.set_levels(_position_id(tools, "THYAO"))
     assert "error" in result
 
 
 # ---- remove / clear ----------------------------------------------------------
 
 async def test_remove_position_existing(tools):
-    await tools.buy_position("THYAO", 10, 100.0)
-    result = await tools.remove_position("THYAO")
-    assert result == {"symbol": "THYAO", "removed": True}
+    await tools.buy_position("THYAO", 10, 100.0, horizon="swing")
+    result = await tools.remove_position(_position_id(tools, "THYAO"))
+    assert result["removed"] is True and result["position_id"]
 
 
 async def test_remove_position_missing(tools):
-    result = await tools.remove_position("THYAO")
+    result = await tools.remove_position(_position_id(tools, "THYAO"))
     assert "error" in result
 
 
 async def test_clear_portfolio(tools):
-    await tools.buy_position("THYAO", 10, 100.0)
-    await tools.buy_position("AKBNK", 20, 50.0)
+    await tools.buy_position("THYAO", 10, 100.0, horizon="swing")
+    await tools.buy_position("AKBNK", 20, 50.0, horizon="swing")
     result = await tools.clear_portfolio()
     assert result == {"removed_count": 2}
 
@@ -220,19 +222,21 @@ async def test_clear_portfolio_empty(tools):
 
 async def test_list_portfolio_empty(tools):
     result = await tools.list_portfolio()
-    assert result == {"positions": []}
+    assert result["positions"] == []
+    assert result["summary"]["market_value"] == 0
+    assert result["summary"]["planned_downside_to_stops"] == 0
 
 
 async def test_list_portfolio_sorted(tools):
-    await tools.buy_position("THYAO", 10, 100.0)
-    await tools.buy_position("AKBNK", 20, 50.0)
+    await tools.buy_position("THYAO", 10, 100.0, horizon="swing")
+    await tools.buy_position("AKBNK", 20, 50.0, horizon="swing")
     result = await tools.list_portfolio()
     assert [p["symbol"] for p in result["positions"]] == ["AKBNK", "THYAO"]
 
 
 async def test_list_portfolio_enriches_with_unrealized():
     tools = _make_tools(prices={"THYAO": 110.0})
-    await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0, target=120.0)
+    await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0, target=120.0, horizon="swing")
     result = await tools.list_portfolio()
     pos = result["positions"][0]
     assert pos["current_price"] == 110.0
@@ -244,7 +248,7 @@ async def test_list_portfolio_enriches_with_unrealized():
 
 async def test_list_portfolio_skips_enrichment_when_no_price():
     tools = _make_tools(prices={})
-    await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0)
+    await tools.buy_position("THYAO", 100, 100.0, stop_loss=95.0, horizon="swing")
     result = await tools.list_portfolio()
     pos = result["positions"][0]
     assert pos["current_price"] is None
@@ -257,10 +261,10 @@ async def test_list_portfolio_skips_enrichment_when_no_price():
 # ---- get_position_tx --------------------------------------------------------
 
 async def test_get_position_tx_returns_chronological(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    await tools.sell_position("THYAO", 30, 11.0)
-    await tools.buy_position("THYAO", 50, 12.0)
-    result = await tools.get_position_tx("THYAO")
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    await tools.sell_position(_position_id(tools, "THYAO"), 30, 11.0)
+    await tools.buy_position("THYAO", 50, 12.0, position_id=_position_id(tools, "THYAO"))
+    result = await tools.get_position_tx(_position_id(tools, "THYAO"))
     txs = result["transactions"]
     assert len(txs) == 3
     assert [t["kind"] for t in txs] == ["BUY", "SELL", "BUY"]
@@ -275,21 +279,21 @@ async def test_get_position_tx_missing_returns_error(tools):
 # ---- list_closed -------------------------------------------------------------
 
 async def test_list_closed_after_full_sell(tools):
-    await tools.buy_position("THYAO", 100, 10.0)
-    await tools.sell_position("THYAO", 100, 12.0)
+    await tools.buy_position("THYAO", 100, 10.0, horizon="swing")
+    await tools.sell_position(_position_id(tools, "THYAO"), 100, 12.0)
     result = await tools.list_closed()
     assert len(result["closed"]) == 1
     c = result["closed"][0]
     assert c["symbol"] == "THYAO"
     assert c["realized_pnl"] == pytest.approx(200.0)
-    assert c["hold_days"] >= 1
+    assert c["hold_days"] is None
 
 
 async def test_list_closed_filtered_by_symbol(tools):
-    await tools.buy_position("THYAO", 10, 100.0)
-    await tools.sell_position("THYAO", 10, 110.0)
-    await tools.buy_position("AKBNK", 20, 50.0)
-    await tools.sell_position("AKBNK", 20, 55.0)
+    await tools.buy_position("THYAO", 10, 100.0, horizon="swing")
+    await tools.sell_position(_position_id(tools, "THYAO"), 10, 110.0)
+    await tools.buy_position("AKBNK", 20, 50.0, horizon="swing")
+    await tools.sell_position(_position_id(tools, "AKBNK"), 20, 55.0)
     result = await tools.list_closed(symbol="THYAO")
     assert len(result["closed"]) == 1
     assert result["closed"][0]["symbol"] == "THYAO"
@@ -314,3 +318,8 @@ def test_as_tool_list_returns_all_tools(tools):
         "get_position_tx",
         "list_closed",
     }
+
+
+def _position_id(tools, symbol):
+    return next((p.id for p in tools._repo.list() if p.symbol == symbol),
+                next((p.id for p in tools._repo.list_closed(symbol=symbol)), symbol))

@@ -11,4 +11,4 @@ def test_init_schema_creates_all_tables(tmp_path: Path) -> None:
     engine = create_db_engine(tmp_path / "test.db")
     init_schema(engine)
     tables = set(inspect(engine).get_table_names())
-    assert {"positions", "position_transactions", "news_digests", "watchlist"} == tables
+    assert {"positions", "position_transactions", "news_digests", "watchlist", "trading_preferences", "conversation_memory", "recommendations", "position_plans"} == tables

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from trader_agent.engine.analysis.pulse import compute_pulse
+from trader_agent.engine.analysis import analyze_session
 from trader_agent.engine.marketdata.cache import MarketBarCache
 from trader_agent.engine.marketdata.base import ProviderResponseError
 from trader_agent.engine.marketdata.service import MarketService, quote_from_data
@@ -83,13 +83,14 @@ async def test_full_holiday_does_not_make_daily_cache_stale(bist_calendar):
     assert provider.get_daily.await_count == 1
 
 
-def test_same_day_snapshot_does_not_reference_today_daily_or_count_today_volume(bist_calendar):
+def test_same_day_snapshot_does_not_reference_today_daily(bist_calendar):
     previous = bar(bist_calendar, "2026-10-27", 100, 1000)
     today = bar(bist_calendar, "2026-10-28", 110, 10000)
     snapshot = SessionSnapshot("THYAO", today, today.period_start.replace(hour=12, minute=29))
     daily = BarData("THYAO", TimeFrame.D1, [previous, today])
-    pulse = compute_pulse(snapshot, daily, 105)
-    assert pulse.change_pct == 10 and pulse.relative_volume == 10
+    session = analyze_session(snapshot, daily)
+    assert session.change_pct == pytest.approx(10)
+    assert session.previous_close == 100
     quote = quote_from_data("THYAO", daily, snapshot, bist_calendar)
     assert quote.kind == "close" and quote.reference_close == 100
     assert quote.change_pct == pytest.approx(10)

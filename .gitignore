@@ -20,6 +20,8 @@ build/
 
 # Data & logs
 data/*.db
+data/*.db-wal
+data/*.db-shm
 data/kap_cache/
 logs/
 *.log
@@ -27,11 +29,11 @@ logs/
 # OS
 .DS_Store
 
-# Web
+# User UI
 node_modules/
-web/dist/
-web/*.tsbuildinfo
-web/test-results/
-web/playwright-report/
+userui/dist/
+userui/*.tsbuildinfo
+userui/test-results/
+userui/playwright-report/
 
 AGENTS.md

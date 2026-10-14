@@ -1,298 +1,151 @@
-from __future__ import annotations
-
+import asyncio
 from datetime import datetime, time, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from trader_agent.engine.marketdata.types import OHLCV, BarData, SessionSnapshot, TimeFrame
+import pytest
+from pydantic import ValidationError
+
+from trader_agent.engine.analysis.service import AnalysisService
 from trader_agent.engine.calendar import ExchangeSchedule, TradingCalendar
+from trader_agent.engine.marketdata.base import ProviderError
+from trader_agent.engine.marketdata.cache import MarketBarCache
+from trader_agent.engine.marketdata.service import MarketService
+from trader_agent.engine.marketdata.types import BarData, OHLCV, TimeFrame
 from trader_agent.engine.tools.analysis import AnalysisTools
 
 
-# ---- Mock market service -----------------------------------------------------
-
-class MockMarket:
-    """Minimal MarketService stub'u (duck-typed); AnalysisTools davranışı testlenir.
-
-    Veri çağrıları ve takvim sorguları MarketService sözleşmesine uyar.
-    """
-
-    def __init__(
-        self,
-        daily: dict[str, BarData] | None = None,
-        intraday: dict[tuple[str, TimeFrame], BarData] | None = None,
-        today: dict[str, SessionSnapshot | None] | None = None,
-    ) -> None:
-        self._daily = daily or {}
-        self._intraday = intraday or {}
-        self._today = today or {}
-        self.calendar = TradingCalendar(ExchangeSchedule(time(10), time(18), timezone.utc), {}, frozenset({2026}))
-
-    def now(self):
-        return datetime(2026, 6, 1, 15, tzinfo=timezone.utc)
-
-    def live_session_open(self):
-        return self.calendar.is_open(self.now()) is True
-
-    async def get_daily(self, symbol: str, period: int) -> BarData:
-        series = self._daily.get(symbol, BarData(symbol, TimeFrame.D1, []))
-        return BarData(series.symbol, series.timeframe, series.bars[-period:])
-
-    async def get_today(self, symbol: str) -> SessionSnapshot | None:
-        return self._today.get(symbol)
-
-    async def get_intraday(self, symbol: str, tf: TimeFrame) -> BarData:
-        return self._intraday.get((symbol, tf), BarData(symbol, tf, []))
+@pytest.fixture
+def setup():
+    calendar = TradingCalendar(ExchangeSchedule(time(10), time(18), timezone.utc), {}, frozenset({2025, 2026}))
+    market = MarketService(SimpleNamespace(calendar=calendar, delay_minutes=15), MarketBarCache())
+    market.now = lambda: datetime(2026, 10, 6, 15, tzinfo=timezone.utc)
+    bars = [OHLCV(datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+                  100, 102, 99, 101, 1000) for i in range(400)]
+    market.get_daily = AsyncMock(side_effect=lambda symbol, count: BarData(symbol, TimeFrame.D1, bars[-count:]))
+    market.get_today = AsyncMock(return_value=None)
+    market.get_intraday = AsyncMock()
+    stocks = {symbol: {"symbol": symbol, "name": symbol} for symbol in ["THYAO", "AKBNK"]}
+    watchlist = SimpleNamespace(list=lambda: list(stocks.values()), stock=lambda symbol: stocks[symbol])
+    service = AnalysisService(market)
+    return AnalysisTools(service, watchlist), market, service
 
 
-# ---- Helpers -----------------------------------------------------------------
-
-def _bar(i: int, close: float = 100.0) -> OHLCV:
-    return OHLCV(
-        period_start=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
-        open=close,
-        high=close + 1,
-        low=close - 1,
-        close=close,
-        volume=1000.0,
-    )
-
-
-def _daily_bars(n: int, symbol: str = "THYAO") -> BarData:
-    return BarData(symbol, TimeFrame.D1, [_bar(i, close=100.0 + i * 0.5) for i in range(n)])
+@pytest.mark.parametrize("horizon,history", [("intraday", 105), ("swing", 250), ("position", 300)])
+async def test_scan_and_detail_share_history_and_values(setup, horizon, history):
+    tools, market, _ = setup
+    scan = await tools.scan(horizon)
+    detail = (await tools.analyze(["THYAO"], horizon))[0]
+    assert len(scan) == 2
+    for key, value in scan[0]["daily"].items():
+        assert value == detail["daily"][key]
+    assert all(call.args[1] == history for call in market.get_daily.await_args_list)
+    assert detail["daily_stale"] is True  # Old daily data remains visible as stale.
+    market.get_intraday.assert_not_called()
 
 
-def _intraday_bars(n: int, symbol: str = "THYAO", tf: TimeFrame = TimeFrame.M15) -> BarData:
-    bars = [
-        OHLCV(
-            period_start=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=i * tf.minutes),
-            open=100 + i * 0.1,
-            high=101 + i * 0.1,
-            low=99 + i * 0.1,
-            close=100 + i * 0.1,
-            volume=1000.0,
-        )
-        for i in range(n)
-    ]
-    return BarData(symbol, tf, bars)
+async def test_missing_symbol_and_provider_failure_are_explicit(setup):
+    tools, market, _ = setup
+    market.get_daily.side_effect = ProviderError("provider unavailable")
+    result = await tools.analyze(["THYAO", "UNKNOWN"], "swing")
+    assert [item["symbol"] for item in result] == ["THYAO", "UNKNOWN"]
+    assert all("error" in item for item in result)
 
 
-def _snapshot(symbol: str = "THYAO", close: float = 125.0) -> SessionSnapshot:
-    return SessionSnapshot(
-        symbol=symbol,
-        ohlcv=OHLCV(
-            period_start=datetime(2026, 6, 1, 10, tzinfo=timezone.utc),
-            open=close,
-            high=close + 1,
-            low=close - 1,
-            close=close,
-            volume=1000.0,
-        ),
-        as_of=datetime(2026, 6, 1, 15, tzinfo=timezone.utc),
-    )
+async def test_session_error_preserves_daily_with_error_context(setup):
+    tools, market, _ = setup
+    market.get_today.side_effect = ProviderError("session unavailable")
+    result = (await tools.analyze(["THYAO"], "intraday"))[0]
+    assert result["daily"]["close"] == 101
+    assert result["session"] is None and result["session_error"] == "session unavailable"
+    assert result["delay_minutes"] == 15
 
 
-STOCKS = [
-    {"symbol": "THYAO", "name": "Türk Hava Yolları"},
-    {"symbol": "AKBNK", "name": "Akbank"},
-]
-WATCHLIST = SimpleNamespace(list=lambda: STOCKS, stocklist=lambda: STOCKS)
+async def test_programming_errors_and_cancellation_are_not_silenced(setup):
+    tools, market, _ = setup
+    market.get_today.side_effect = RuntimeError("bug")
+    with pytest.raises(RuntimeError, match="bug"):
+        await tools.analyze(["THYAO"], "swing")
+    market.get_today.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await tools.scan("swing")
 
 
-# ---- scan --------------------------------------------------------------------
+async def test_tool_validation_happens_before_io(setup):
+    tools, market, _ = setup
+    for symbols, horizon in [([], "swing"), (["THYAO"] * 11, "swing"), (["../x"], "swing"), (["THYAO"], "forever")]:
+        with pytest.raises(ValidationError):
+            await tools.analyze(symbols, horizon)
+    market.get_daily.assert_not_called()
+    with pytest.raises(ValidationError):
+        await tools.evaluate_trade(True, 95, 110)
+    with pytest.raises(ValueError, match="stop < entry < target"):
+        await tools.evaluate_trade(100, 105, 110)
+    assert (await tools.evaluate_trade(100, 95, 110))["reward_to_risk"] == 2
 
-async def test_scan_retains_daily_analysis_when_calendar_is_uncovered(bist_calendar):
-    market = MockMarket(daily={"THYAO": _daily_bars(30)})
+
+async def test_duplicates_are_coalesced_and_tool_surface_is_small(setup):
+    tools, market, _ = setup
+    assert len(await tools.analyze(["THYAO", "THYAO"], "swing")) == 1
+    assert market.get_daily.await_count == 1
+    registered = tools.as_tool_list()
+    assert {tool.name for tool in registered} == {"scan", "analyze", "evaluate_trade"}
+    assert all(tool.input_schema["additionalProperties"] is False for tool in registered)
+
+
+async def test_concurrent_requests_share_provider_limit(setup):
+    _, market, service = setup
+    original = market.get_daily.side_effect
+    release = asyncio.Event()
+    ready = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def delayed(symbol, count):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 3:
+            ready.set()
+        await release.wait()
+        active -= 1
+        return original(symbol, count)
+
+    market.get_daily.side_effect = delayed
+    tasks = [asyncio.create_task(service.analyze("THYAO", "swing")) for _ in range(10)]
+    try:
+        await asyncio.wait_for(ready.wait(), 1)
+        release.set()
+        await asyncio.gather(*tasks)
+        assert peak == 3
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_preopen_previous_close_is_current_daily_reference_not_15_minutes_old(setup, bist_calendar):
+    tools, market, _ = setup
     market.calendar = bist_calendar
-    market.now = lambda: datetime(2028, 1, 3, 15, tzinfo=bist_calendar.timezone)
-    tools = AnalysisTools(market, WATCHLIST)
-    result = (await tools.scan())[0]
-    assert "daily" in result and result["pulse"] is None
-
-async def test_scan_returns_one_entry_per_watchlist_symbol():
-    provider = MockMarket(daily={
-        "THYAO": _daily_bars(30, "THYAO"),
-        "AKBNK": _daily_bars(30, "AKBNK"),
-    })
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.scan()
-    symbols = {r["symbol"] for r in results}
-    assert symbols == {"THYAO", "AKBNK"}
-
-
-async def test_scan_daily_block_has_expected_fields():
-    provider = MockMarket(daily={
-        "THYAO": _daily_bars(30, "THYAO"),
-        "AKBNK": _daily_bars(30, "AKBNK"),
-    })
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.scan()
-    for r in results:
-        assert "daily" in r
-        for key in ("close", "ema_trend", "ema_alignment", "rsi", "atr", "relative_volume", "candle"):
-            assert key in r["daily"]
-
-
-async def test_scan_pulse_null_when_no_today_bar():
-    provider = MockMarket(
-        daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")},
-        today={},  # boş — get_today None döner
-    )
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.scan()
-    for r in results:
-        assert r["pulse"] is None
-
-
-async def test_scan_pulse_present_when_today_bar():
-    provider = MockMarket(
-        daily={"THYAO": _daily_bars(30), "AKBNK": _daily_bars(30, "AKBNK")},
-        today={"THYAO": _snapshot("THYAO", 125.0), "AKBNK": _snapshot("AKBNK", 60.0)},
-    )
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.scan()
-    thyao = next(r for r in results if r["symbol"] == "THYAO")
-    assert thyao["pulse"] is not None
-    assert thyao["pulse"]["current_price"] == 125.0
-    assert "change_pct" in thyao["pulse"]
-    assert "price_vs_ema" in thyao["pulse"]
-
-
-async def test_scan_returns_error_for_symbol_with_insufficient_bars():
-    provider = MockMarket(daily={"THYAO": _daily_bars(1), "AKBNK": _daily_bars(30, "AKBNK")})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.scan()
-    thyao = next(r for r in results if r["symbol"] == "THYAO")
-    assert "error" in thyao
-
-
-# ---- get_daily_indicators -----------------------------------------------------
-
-async def test_get_daily_indicators_structure():
-    provider = MockMarket(daily={"THYAO": _daily_bars(60)})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_daily_indicators(["THYAO"])
-    assert len(results) == 1
-    r = results[0]
-    assert r["symbol"] == "THYAO"
-    assert r["name"] == "Türk Hava Yolları"
-    ind = r["indicators"]
-    for key in ("ema_trend", "ema_alignment", "rsi", "rsi_divergence", "macd_histogram", "atr", "bb_width", "bb_pct_b"):
-        assert key in ind
-
-
-async def test_get_daily_indicators_error_on_insufficient_bars():
-    provider = MockMarket(daily={"THYAO": _daily_bars(1)})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_daily_indicators(["THYAO"])
-    assert "error" in results[0]
-
-
-async def test_get_daily_indicators_multiple_symbols_parallel():
-    provider = MockMarket(daily={
-        "THYAO": _daily_bars(60, "THYAO"),
-        "AKBNK": _daily_bars(60, "AKBNK"),
-    })
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_daily_indicators(["THYAO", "AKBNK"])
-    assert {r["symbol"] for r in results} == {"THYAO", "AKBNK"}
-
-
-# ---- get_intraday_indicators --------------------------------------------------
-
-async def test_get_intraday_indicators_returns_m15_and_m5():
-    provider = MockMarket(intraday={
-        ("THYAO", TimeFrame.M15): _intraday_bars(20, tf=TimeFrame.M15),
-        ("THYAO", TimeFrame.M5): _intraday_bars(20, tf=TimeFrame.M5),
-    })
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_intraday_indicators(["THYAO"])
-    r = results[0]
-    assert "m15" in r
-    assert "m5" in r
-
-
-async def test_get_intraday_indicators_error_when_both_empty():
-    provider = MockMarket(intraday={})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_intraday_indicators(["THYAO"])
-    assert "error" in results[0]
-
-
-# ---- get_pulse ---------------------------------------------------------------
-
-async def test_get_pulse_returns_session_snapshot_when_today_available():
-    provider = MockMarket(
-        daily={"THYAO": _daily_bars(30)},
-        today={"THYAO": _snapshot("THYAO", 125.0)},
-    )
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_pulse(["THYAO"])
-    r = results[0]
-    assert r["pulse"]["current_price"] == 125.0
-    assert "change_pct" in r["pulse"]
-    assert "gap_pct" in r["pulse"]
-    assert "range_position" in r["pulse"]
-
-
-async def test_get_pulse_error_when_session_closed():
-    provider = MockMarket(daily={"THYAO": _daily_bars(30)}, today={})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_pulse(["THYAO"])
-    assert "error" in results[0]
-
-
-# ---- get_levels --------------------------------------------------------------
-
-async def test_get_levels_structure():
-    provider = MockMarket(daily={"THYAO": _daily_bars(30)})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_levels(["THYAO"])
-    r = results[0]
-    assert r["symbol"] == "THYAO"
-    levels = r["levels"]
-    for key in ("pivot", "prev_high", "prev_low", "prev_close", "weekly_high", "weekly_low", "candle", "relative_volume"):
-        assert key in levels
-
-
-async def test_get_levels_pivot_fields():
-    provider = MockMarket(daily={"THYAO": _daily_bars(30)})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_levels(["THYAO"])
-    pivot = results[0]["levels"]["pivot"]
-    for key in ("pp", "r1", "r2", "s1", "s2"):
-        assert key in pivot
-
-
-async def test_get_levels_error_on_insufficient_bars():
-    provider = MockMarket(daily={"THYAO": _daily_bars(1)})
-    tools = AnalysisTools(provider, WATCHLIST)
-    results = await tools.get_levels(["THYAO"])
-    assert "error" in results[0]
-
-
-# ---- as_tool_list ------------------------------------------------------------
-
-def test_as_tool_list_has_all_five_tools():
-    tools = AnalysisTools(MockMarket(), WATCHLIST)
-    assert len(tools.as_tool_list()) == 5
-
-
-def test_as_tool_list_names():
-    tools = AnalysisTools(MockMarket(), WATCHLIST)
-    names = {t.name for t in tools.as_tool_list()}
-    assert names == {
-        "scan",
-        "get_daily_indicators",
-        "get_intraday_indicators",
-        "get_pulse",
-        "get_levels",
-    }
-
-
-def test_tool_to_api_dict_has_required_keys():
-    tools = AnalysisTools(MockMarket(), WATCHLIST)
-    for tool in tools.as_tool_list():
-        d = tool.to_api_dict()
-        assert "name" in d
-        assert "description" in d
-        assert "input_schema" in d
+    market.now = lambda: datetime(2026, 10, 14, 9, 10, tzinfo=bist_calendar.timezone)
+    bars = []
+    session = bist_calendar.previous_session(market.now().date())
+    for _ in range(260):
+        bars.append(OHLCV(session.start, 100, 102, 99, 101, 1000))
+        session = bist_calendar.previous_session(session.date)
+    bars.reverse()
+    market.get_daily.side_effect = lambda symbol, count: BarData(symbol, TimeFrame.D1, bars[-count:])
+    for result in [*(await tools.scan("swing")), *(await tools.analyze(["THYAO"], "swing"))]:
+        assert result['observed_at'] == '2026-10-14T09:10:00+03:00'
+        assert result['session_date'] == '2026-10-13'
+        assert result['as_of'] == '2026-10-13T18:10:00+03:00'
+        assert result['price_kind'] == 'close'
+        assert result['delay_minutes'] == 15
+        assert result['price_age_minutes'] == 900
+        assert result['daily_stale'] is False
+        assert result['session_open'] is False
+        assert result['session'] is None
+    # A genuinely missing session must still be reported as stale.
+    bars[:] = bars[:-1]
+    result = (await tools.analyze(["THYAO"], "swing"))[0]
+    assert result['daily_stale'] is True

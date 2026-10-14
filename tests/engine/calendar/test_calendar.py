@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trader_agent.engine.calendar import (
-    CalendarCoverageError, DaySchedule, ExchangeSchedule, TradingCalendar, TradingSession,
+    CalendarCoverageError, ExchangeSchedule, TradingCalendar, TradingDay, TradingSession,
 )
 from trader_agent.engine.marketdata.helpers import delayed_now, expected_period_start
 from trader_agent.engine.marketdata.types import TimeFrame
@@ -140,7 +140,7 @@ def test_weekdays_are_configurable_and_half_day_can_override_open():
         moment("2026-10-11T11:00"), moment("2026-10-11T13:00"), moment("2026-10-11T13:00"),
     )
     calendar = TradingCalendar(
-        schedule, {on: DaySchedule(on, "half_day", session, "Test")}, frozenset({2026}),
+        schedule, {on: TradingDay(on, "half_day", session, "Test")}, frozenset({2026}),
     )
     assert calendar.day(date(2026, 10, 9)).kind == "closed"
     assert calendar.day(date(2026, 10, 11)).session.start == moment("2026-10-11T11:00")
@@ -158,7 +158,7 @@ def test_calendar_is_immutable_and_requires_aware_queries(bist_calendar):
 
 def test_calendar_snapshots_supplied_exceptions():
     on = date(2026, 10, 7)
-    exceptions = {on: DaySchedule(on, "closed", None, "Test")}
+    exceptions = {on: TradingDay(on, "closed", None, "Test")}
     calendar = TradingCalendar(
         ExchangeSchedule(time(10), time(18), TZ), exceptions, frozenset({2026}),
     )
@@ -185,6 +185,66 @@ def test_session_search_reports_date_limits_without_overflow():
         calendar.previous_session(date.min)
     with pytest.raises(CalendarCoverageError):
         calendar.next_session(date.max)
+
+
+@pytest.mark.parametrize("inclusive", [False, True])
+def test_session_search_inclusion_and_holidays(
+    bist_calendar: TradingCalendar, inclusive: bool,
+) -> None:
+    on = date(2026, 10, 28)
+    previous = bist_calendar.previous_session(on, inclusive=inclusive)
+    following = bist_calendar.next_session(on, inclusive=inclusive)
+    assert previous.date == (on if inclusive else date(2026, 10, 27))
+    assert following.date == (on if inclusive else date(2026, 10, 30))
+
+    holiday = date(2026, 10, 29)
+    assert bist_calendar.previous_session(holiday, inclusive=inclusive).date == on
+    assert bist_calendar.next_session(holiday, inclusive=inclusive).date == date(2026, 10, 30)
+
+
+def test_next_open_requires_a_future_opening_and_sufficient_coverage(
+    bist_calendar: TradingCalendar,
+) -> None:
+    assert bist_calendar.next_open(moment("2026-10-28T10:00")) == moment("2026-10-30T10:00")
+    assert bist_calendar.next_open(moment("2027-12-31T18:00")) is None
+
+
+def test_uncovered_history_keeps_known_holidays(bist_calendar: TradingCalendar) -> None:
+    on = date(2026, 10, 29)
+    assert bist_calendar.day(on, allow_uncovered=True) == bist_calendar.day(on)
+    assert bist_calendar.last_completed_session(
+        moment("2026-10-29T19:00"), allow_uncovered=True,
+    ).date == date(2026, 10, 28)
+
+
+def test_completed_session_requires_coverage_unless_history_explicitly_allows_it(
+    bist_calendar: TradingCalendar,
+) -> None:
+    at = moment("2028-01-03T19:00")
+    with pytest.raises(CalendarCoverageError, match="2028-01-03"):
+        bist_calendar.last_completed_session(at)
+    assert bist_calendar.last_completed_session(at, allow_uncovered=True).date == at.date()
+
+
+def test_datetime_queries_resolve_the_exchange_date(bist_calendar: TradingCalendar) -> None:
+    # UTC hâlâ 28 Ekim iken İstanbul'da tatil günü başlamıştır.
+    at = datetime(2026, 10, 28, 22, tzinfo=timezone.utc)
+    assert bist_calendar.reliable_bounds(at) is None
+    assert bist_calendar.last_completed_session(at).date == date(2026, 10, 28)
+    assert bist_calendar.next_open(at) == moment("2026-10-30T10:00")
+
+
+def test_reliable_bounds_honors_explicit_date_and_opening_boundary(
+    bist_calendar: TradingCalendar,
+) -> None:
+    start = moment("2026-10-28T10:00")
+    assert bist_calendar.reliable_bounds(start) == (start, start)
+    assert bist_calendar.reliable_bounds(start - timedelta(microseconds=1)) is None
+    assert bist_calendar.reliable_bounds(
+        moment("2026-10-29T11:00"), on=start.date(),
+    ) == (start, moment("2026-10-28T12:30"))
+    with pytest.raises(CalendarCoverageError, match="2028-01-03"):
+        bist_calendar.reliable_bounds(start, on=date(2028, 1, 3))
 
 
 @pytest.mark.parametrize("tf", [TimeFrame.M1, TimeFrame.M5, TimeFrame.M15, TimeFrame.H1])

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ..analysis import Horizon, RiskLevel
 
 _MAX_THESES = 10
 _MAX_DECISIONS = 25
@@ -13,13 +15,14 @@ class ActiveThesis(BaseModel):
     """Bir hisse için aktif olarak izlenen qualitative tez.
 
     Somut fiyat seviyeleri (entry/stop/target) BURADA tutulmaz; her seferinde
-    fresh ``get_levels``/``get_daily_indicators`` ile yeniden hesaplanır. State'in
+    ``analyze`` ile yeniden alınır. State'in
     plan numaralarını cache'leyip canlı veriyi baskılamasını önler. Tez sadece
     niyet, tetik tipi ve durum notu olarak kayda alınır.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    horizon: Horizon | None = None
     stance: Literal["watching", "committed", "passed"]
     thesis: str = Field(max_length=200)
     noted_at: datetime
@@ -45,22 +48,33 @@ class Decision(BaseModel):
     symbol: str
     type: Literal["BUY", "SELL"]
     entry: float = Field(gt=0, allow_inf_nan=False, strict=True)
-    stop: float = Field(gt=0, allow_inf_nan=False, strict=True)
+    stop: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     target: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    horizon: Horizon | None = None
+    risk_level: RiskLevel | None = None
     rationale: str = Field(max_length=400)
     at: datetime
     outcome: DecisionOutcome | None = None
 
+    @model_validator(mode="after")
+    def require_buy_stop(self) -> Self:
+        """BUY kaydı tam bir long planına dayanır; SELL için yeni stop gerekmez."""
+        if self.type == "BUY" and self.stop is None:
+            raise ValueError("A BUY decision must include its planned stop.")
+        return self
+
 
 class UserContext(BaseModel):
-    """Kullanıcıdan öğrenilen kalıcı tercih ve kısıtlar.
+    """Bu sohbetin güncel tercih ve kısıtlarını turlar arasında taşır.
 
-    Açık sorular gibi turn-over hızlı bilgiler burada tutulmaz; onlar rolling
-    narrative summary'de yer alır.
+    Arayüz seçimleri uygulama tarafından korunur; geçmiş tercihler mesajların
+    tarihli bağlamındadır. Sohbet sıfırlanınca bu kayıt da temizlenir.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    horizon: Horizon | None = None
+    risk_level: RiskLevel | None = None
     preferences: list[str] = Field(default_factory=list, max_length=10)
     constraints: list[str] = Field(default_factory=list, max_length=10)
 
@@ -83,6 +97,8 @@ class AgentState(BaseModel):
         return (
             not self.active_theses
             and not self.decisions
+            and self.user_context.horizon is None
+            and self.user_context.risk_level is None
             and not self.user_context.preferences
             and not self.user_context.constraints
         )

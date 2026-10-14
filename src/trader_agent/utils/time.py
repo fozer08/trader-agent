@@ -11,7 +11,7 @@ def _parse_time(value: object) -> time:
         parts = value.split(":")
         if len(parts) not in (2, 3):
             raise ValueError("Saat HH:MM veya HH:MM:SS olmalıdır.")
-        result = time(*(int(part) for part in parts))
+        result = time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) == 3 else 0)
     else:
         raise ValueError("Saat HH:MM veya HH:MM:SS olmalıdır.")
     if result.tzinfo is not None:

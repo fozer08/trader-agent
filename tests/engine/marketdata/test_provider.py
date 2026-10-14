@@ -530,3 +530,54 @@ def _rows_back(days: int, step: int = 1) -> list[dict]:
         }
         for i in range(0, days, step)
     ]
+
+
+async def test_daily_missing_range_preserves_quality_for_analysis():
+    provider = _empty_provider()
+    try:
+        result = provider._daily_rows_to_bars("THYAO", [{
+            "HGDG_TARIH": "28-04-2026", "HGDG_KAPANIS": "103.0",
+        }])
+        assert result.bars[0].ohlc_kind == "close_only"
+        assert result.bars[0].close == 103
+    finally:
+        await provider.aclose()
+
+
+async def test_inconsistent_reported_daily_range_is_rejected():
+    provider = _empty_provider()
+    try:
+        with pytest.raises(ProviderResponseError, match="Inconsistent"):
+            provider._daily_rows_to_bars("THYAO", [{
+                "HGDG_TARIH": "28-04-2026", "HGDG_KAPANIS": "103.0",
+                "HGDG_ACILIS": "100.0", "HGDG_MIN": "104.0", "HGDG_MAX": "105.0",
+            }])
+    finally:
+        await provider.aclose()
+
+
+async def test_sampled_price_quality_survives_aggregation():
+    from trader_agent.engine.marketdata.helpers import aggregate_bars
+    provider = _empty_provider()
+    start = datetime(2026, 4, 29, 10, tzinfo=TZ)
+    try:
+        source = provider._price_points_to_bars("THYAO", [
+            _PricePoint(start + timedelta(minutes=i), 100 + i) for i in range(5)
+        ], start + timedelta(minutes=5))
+        result = aggregate_bars(source, TimeFrame.M5, start + timedelta(minutes=5), start.time())
+        assert result.bars[0].ohlc_kind == "sampled"
+        assert result.bars[0].high == 104
+    finally:
+        await provider.aclose()
+
+
+async def test_missing_open_retains_reported_range_quality():
+    provider = _empty_provider()
+    try:
+        result = provider._daily_rows_to_bars("THYAO", [{
+            "HGDG_TARIH": "28-04-2026", "HGDG_KAPANIS": "103.0",
+            "HGDG_MIN": "99.0", "HGDG_MAX": "105.0",
+        }])
+        assert result.bars[0].ohlc_kind == "range_only"
+    finally:
+        await provider.aclose()

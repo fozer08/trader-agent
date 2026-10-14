@@ -260,3 +260,35 @@ def test_decision_rejects_invalid_prices(field, value):
     data[field] = value
     with pytest.raises(ValidationError):
         Decision.model_validate(data)
+
+
+@pytest.mark.parametrize("horizon", ["intraday", "swing", "position"])
+@pytest.mark.parametrize("risk", ["low", "moderate", "high"])
+def test_horizon_and_risk_survive_memory_round_trip(horizon, risk):
+    from trader_agent.engine.agent.memory import ConversationMemory
+    memory = ConversationMemory()
+    state = AgentState(user_context=UserContext(horizon=horizon, risk_level=risk))
+    memory.apply({"state": state.model_dump(mode="json"), "summary": "Açık kullanıcı tercihi"})
+    assert not memory.state.is_empty()
+    assert memory.state.user_context.horizon == horizon
+    assert memory.state.user_context.risk_level == risk
+    assert f'"horizon": "{horizon}"' in memory.system_context()
+
+
+def test_invalid_preference_preserves_previous_memory():
+    from trader_agent.engine.agent.memory import ConversationMemory
+    memory = ConversationMemory()
+    memory.state.user_context.horizon = "position"
+    with pytest.raises(ValidationError):
+        memory.apply({"state": {"user_context": {"risk_level": "unlimited"}}, "summary": ""})
+    assert memory.state.user_context.horizon == "position"
+
+
+def test_sell_record_does_not_require_invented_stop_and_target():
+    decision = Decision(symbol="TEST", type="SELL", entry=100., rationale="Tez bozuldu", at=_now(), horizon="position")
+    assert decision.stop is decision.target is None
+
+
+def test_buy_record_still_requires_a_planned_stop():
+    with pytest.raises(ValidationError, match="planned stop"):
+        Decision(symbol="TEST", type="BUY", entry=100., rationale="Koşullu giriş", at=_now())

@@ -21,9 +21,9 @@ class FakeRunner:
     def set_output_format(self, output_format):
         self.output_format = output_format
 
-    async def chat(self, message):
+    async def chat(self, message, preferences=None):
         self.messages.append(message)
-        yield {"type": "tool", "name": "get_levels"}
+        yield {"type": "tool", "name": "analyze"}
         yield {"type": "text", "content": f"Yanıt: {message}"}
 
     def reset(self):
@@ -40,7 +40,7 @@ async def test_web_sessions_share_runtime_and_keep_independent_conversations():
     runtime = EngineRuntime(FakeRunner)
     first = [event async for event in runtime.chat("web:first", "ilk mesaj", "markdown")]
     assert first == [
-        {"type": "tool", "name": "get_levels"},
+        {"type": "tool", "name": "analyze"},
         {"type": "text", "content": "Yanıt: ilk mesaj"},
     ]
     _ = [event async for event in runtime.chat("web:second", "ikinci mesaj", "markdown")]
@@ -84,7 +84,7 @@ async def test_busy_session_is_not_evicted():
     finish = asyncio.Event()
 
     class SlowRunner(FakeRunner):
-        async def chat(self, message):
+        async def chat(self, message, preferences=None):
             started.set()
             await finish.wait()
             yield {"type": "text", "content": "tamam"}
@@ -109,7 +109,7 @@ async def test_same_session_requests_are_serialized():
     maximum = 0
 
     class Runner(FakeRunner):
-        async def chat(self, message):
+        async def chat(self, message, preferences=None):
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
@@ -247,7 +247,7 @@ async def test_jobs_use_the_runtimes_shared_services():
         FakeRunner, market=market, news=news, watchlist=SimpleNamespace(list=lambda: watchlist),
     )
     assert await runtime.prefetch_market() == {"THYAO": True}
-    market.get_daily.assert_awaited_once_with("THYAO", period=200)
+    market.get_daily.assert_awaited_once_with("THYAO", period=300)
     await runtime.daily_digest()
     news.refresh_daily_digest.assert_awaited_once_with(symbols={"THYAO"}, since=None)
     await runtime.aclose()
@@ -276,4 +276,35 @@ async def test_jobs_read_updated_database_watchlist(tmp_path):
         )
     finally:
         await runtime.aclose()
+        database.dispose()
+
+async def test_persistent_memory_is_restored_after_eviction_restart_and_reset(tmp_path):
+    from trader_agent.engine.repository.conversations import ConversationRepository
+
+    class RestorableRunner(FakeRunner):
+        """Runtime'ın yeniden yükleme sözleşmesini model çağrısı yapmadan sınar."""
+
+        def restore_memory(self, value):
+            self.messages = value.get("messages", [])
+
+    database = create_db_engine(tmp_path / "memory.db")
+    init_schema(database)
+    repository = ConversationRepository(create_session_factory(database))
+    first = EngineRuntime(RestorableRunner, conversations=repository, max_sessions=1)
+    try:
+        _ = [event async for event in first.chat("alice:chat", "ilk")]
+        _ = [event async for event in first.chat("bob:chat", "başka")]
+        _ = [event async for event in first.chat("alice:chat", "ikinci")]
+        assert (await first.memory("alice:chat"))["messages"] == ["ilk", "ikinci"]
+    finally:
+        await first.aclose()
+    second = EngineRuntime(RestorableRunner, conversations=repository)
+    try:
+        await second.reset("alice:chat")
+        _ = [event async for event in second.chat("alice:chat", "yeni")]
+        _ = [event async for event in second.chat("bob:chat", "devam")]
+        assert (await second.memory("alice:chat"))["messages"] == ["yeni"]
+        assert (await second.memory("bob:chat"))["messages"] == ["başka", "devam"]
+    finally:
+        await second.aclose()
         database.dispose()

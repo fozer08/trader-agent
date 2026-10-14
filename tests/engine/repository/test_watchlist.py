@@ -22,23 +22,17 @@ def storage(tmp_path):
     database.dispose()
 
 
-def test_seed_uses_first_ten_stocks_in_file_order(storage):
-    repository, factory, stocks = storage
-    repository.seed_if_empty()
-
-    assert repository.list() == stocks[:10]
+def test_new_account_starts_with_an_empty_watchlist(storage):
+    repository, factory, _ = storage
+    assert repository.list() == []
     with factory() as session:
-        assert list(session.scalars(select(WatchlistORM.symbol).order_by(WatchlistORM.id))) == [
-            stock["symbol"] for stock in stocks[:10]
-        ]
+        assert list(session.scalars(select(WatchlistORM.symbol))) == []
 
 
 def test_existing_watchlist_is_kept_and_survives_repository_restart(storage):
     repository, factory, stocks = storage
     repository.add("S11")
-    repository.seed_if_empty()
     reopened = WatchlistRepository(factory, stocks)
-    reopened.seed_if_empty()
 
     assert reopened.list() == [stocks[11]]
 
@@ -69,23 +63,22 @@ def test_only_catalog_stocks_can_be_added(storage):
     assert repository.list() == []
 
 
-def test_remove_leaves_empty_list_until_next_startup(storage):
-    repository, _, stocks = storage
+def test_empty_list_stays_empty_after_restart(storage):
+    repository, factory, stocks = storage
     repository.add("S11")
     assert repository.remove(" s11 ")
     assert not repository.remove("S11")
     assert repository.list() == []
 
-    repository.seed_if_empty()
-    assert repository.list() == stocks[:10]
+    assert WatchlistRepository(factory, stocks).list() == []
 
 
 @pytest.mark.parametrize("size", [0, 3])
-def test_small_catalog_seeds_all_available_stocks(storage, size):
+def test_small_catalog_does_not_preselect_stocks(storage, size):
     _, factory, stocks = storage
     repository = WatchlistRepository(factory, stocks[:size])
-    repository.seed_if_empty()
-    assert repository.list() == stocks[:size]
+    assert repository.list() == []
+    assert repository.stocklist() == stocks[:size]
 
 
 @pytest.mark.parametrize("stocks", [
@@ -100,3 +93,31 @@ def test_invalid_catalog_is_rejected(storage, stocks):
     _, factory, _ = storage
     with pytest.raises(ValueError):
         WatchlistRepository(factory, stocks)
+
+def test_user_lists_are_isolated_and_limit_is_atomic(storage):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _, factory, stocks = storage
+    first = WatchlistRepository(factory, stocks, "alice")
+    second = WatchlistRepository(factory, stocks, "bob")
+    for stock in stocks[:9]:
+        first.add(stock["symbol"])
+
+    def add(symbol):
+        try:
+            first.add(symbol)
+            return True
+        except ValueError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(add, ["S09", "S10"]))
+    assert sorted(results) == [False, True]
+    assert len(first.list()) == 10
+    assert second.list() == []
+    first.add("S00")  # A repeated selection does not consume a slot.
+    second.add("S11")
+    first.remove("S00")
+    first.add("S11")
+    assert second.list() == [stocks[11]]
+    assert len(first.list()) == 10

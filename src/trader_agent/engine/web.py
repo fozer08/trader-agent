@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 from datetime import datetime, timezone
 from time import monotonic
 from uuid import uuid4
 
-from .analysis import compute_indicator, compute_levels, compute_pulse
-from .marketdata.service import MarketService, QuoteRevision, quote_from_data
+from .analysis import Horizon
+from .positions import Source
+from .recommendations import RecommendationService
+from .repository.preferences import TradingPreferencesRepository
+from .analysis.service import AnalysisService
+from .marketdata.service import MarketService, QuoteRevision
 from .news.service import NewsService
 from .repository import PortfolioRepository, WatchlistRepository
-from .tools.analysis import _indicators_to_dict, _levels_to_dict
 from .tools.news import NewsTools
 from .tools.portfolio import PortfolioTools
 from .marketdata.types import TimeFrame
@@ -25,10 +27,17 @@ class WebService:
         portfolio: PortfolioRepository,
         news: NewsService | None,
         watchlist: WatchlistRepository,
+        analysis: AnalysisService,
+        recommendations: RecommendationService,
+        preferences: TradingPreferencesRepository | None = None,
     ) -> None:
+        self.preferences = preferences
+        self.analysis = analysis
+        self.horizon: Horizon = "swing"
         self.market = market
         self.repository = portfolio
         self.portfolio_tools = PortfolioTools(portfolio, market)
+        self.recommendations = recommendations
         self.news = NewsTools(news) if news else None
         self.watchlist_repository = watchlist
         self._watchlist_lock = asyncio.Lock()
@@ -37,7 +46,6 @@ class WebService:
         self._refresh_task: asyncio.Task | None = None
         self._refresh_at = 0.0
         self._refresh_completed_at: str | None = None
-        self._semaphore = asyncio.Semaphore(3)
         self._quote_revision: QuoteRevision | None = None
 
     @property
@@ -96,6 +104,11 @@ class WebService:
         return self.watchlist_repository.stock(symbol)["symbol"]
 
     async def watchlist_view(self) -> dict:
+        horizon = ((await asyncio.to_thread(self.preferences.get)).horizon if self.preferences else None) or "swing"
+        if horizon != self.horizon:
+            await self._reset_quotes()
+            self._quotes.clear()
+            self.horizon = horizon
         entries = self.watchlist
         revision = self.market.quote_revision()
         if revision != self._quote_revision:
@@ -122,79 +135,25 @@ class WebService:
         entries = self.watchlist
 
         async def refresh(symbol: str) -> None:
-            async with self._semaphore:
-                try:
-                    self._quotes[symbol] = await self.quote(symbol)
-                except Exception:
-                    previous = self._quotes.get(symbol, entries[symbol])
-                    self._quotes[symbol] = {
-                        **previous,
-                        "pending": False,
-                        "error": "Piyasa verisi alınamadı.",
-                    }
+            try:
+                self._quotes[symbol] = await self.quote(symbol, self.horizon)
+            except Exception:
+                previous = self._quotes.get(symbol, entries[symbol])
+                self._quotes[symbol] = {
+                    **previous,
+                    "pending": False,
+                    "error": "Piyasa verisi alınamadı.",
+                }
 
         await asyncio.gather(*(refresh(symbol) for symbol in entries))
         self._refresh_completed_at = datetime.now(timezone.utc).isoformat()
 
-    async def quote(self, symbol: str) -> dict:
+    async def quote(self, symbol: str, horizon: Horizon = "swing") -> dict:
         entry = self.watchlist_repository.stock(symbol)
-        symbol = entry["symbol"]
-        daily_series, snapshot = await asyncio.gather(
-            self.market.get_daily(symbol, 100),
-            self._snapshot(symbol),
-        )
-        if len(daily_series.bars) < 2:
-            raise ValueError("Analiz için yeterli günlük veri bulunamadı.")
-        ind = compute_indicator(daily_series)
-        levels = compute_levels(daily_series)
-        last = daily_series.bars[-1]
-        quote = quote_from_data(symbol, daily_series, snapshot, self.market.calendar)
-        return {
-            **entry,
-            "pending": False,
-            "price": quote.price,
-            "change_pct": quote.change_pct,
-            "as_of": quote.as_of.isoformat() if quote.as_of else None,
-            "session_date": quote.session_date.isoformat() if quote.session_date else None,
-            "price_kind": quote.kind,
-            "daily": {
-                **_indicators_to_dict(ind),
-                "close": last.close,
-                "ema_fast": ind.ema_fast,
-                "ema_slow": ind.ema_slow,
-                "relative_volume": levels.relative_volume,
-            },
-            "pulse": asdict(compute_pulse(snapshot, daily_series, ind.ema_fast)) if snapshot and self.market.live_session_open() else None,
-        }
+        return {**entry, **await self.analysis.analyze(entry["symbol"], horizon), "pending": False}
 
-    async def _snapshot(self, symbol: str):
-        try:
-            return await self.market.get_today(symbol)
-        except Exception:
-            return None
-
-    async def symbol_view(self, symbol: str) -> dict:
-        symbol = self.require_symbol(symbol)
-        quote, series, intraday = await asyncio.gather(
-            self.quote(symbol),
-            self.market.get_daily(symbol, 100),
-            self._intraday_indicators(symbol),
-        )
-        return {**quote, "levels": _levels_to_dict(compute_levels(series)), "intraday": intraday}
-
-    async def _intraday_indicators(self, symbol: str) -> dict:
-        async def indicators(tf: TimeFrame):
-            try:
-                series = await self.market.get_intraday(symbol, tf)
-                return (
-                    _indicators_to_dict(compute_indicator(series))
-                    if len(series.bars) >= 2 else None
-                )
-            except Exception:
-                return None
-
-        m5, m15 = await asyncio.gather(indicators(TimeFrame.M5), indicators(TimeFrame.M15))
-        return {"m5": m5, "m15": m15}
+    async def symbol_view(self, symbol: str, horizon: Horizon = "swing") -> dict:
+        return await self.quote(self.require_symbol(symbol), horizon)
 
     async def bars_view(self, symbol: str, timeframe: str) -> dict:
         symbol = self.require_symbol(symbol)
@@ -207,7 +166,9 @@ class WebService:
         return {
             "symbol": series.symbol,
             "timeframe": series.timeframe.name,
-            "chart_type": "candlestick" if tf is TimeFrame.D1 else "line",
+            "chart_type": "candlestick" if tf is TimeFrame.D1 and all(
+                bar.ohlc_kind == "reported" for bar in series.bars
+            ) else "line",
             "bars": [
                 {
                     "time": bar.period_start.isoformat(),
@@ -216,30 +177,17 @@ class WebService:
                     "low": bar.low,
                     "close": bar.close,
                     "volume": bar.volume,
+                    "ohlc_kind": bar.ohlc_kind,
                 }
                 for bar in series.bars
             ],
         }
 
-    async def portfolio_view(self) -> dict:
-        positions = (await self.portfolio_tools.list_portfolio())["positions"]
-        missing = sum(p["current_price"] is None for p in positions)
-        total_cost = sum(p["quantity"] * p["avg_cost"] for p in positions)
-        market_value = sum(
-            p["quantity"] * p["current_price"] for p in positions if p["current_price"] is not None
-        )
-        pnl = sum(p.get("unrealized_pnl", 0) for p in positions)
-        return {
-            "positions": positions,
-            "summary": {
-                "total_cost": total_cost,
-                "market_value": None if missing else market_value,
-                "unrealized_pnl": None if missing else pnl,
-                "unrealized_pnl_pct": None if missing or not total_cost else pnl / total_cost * 100,
-                "realized_pnl": sum(p["realized_pnl"] for p in positions),
-                "missing_prices": missing,
-            },
-        }
+    async def portfolio_view(self, source: Source | None = None) -> dict:
+        result = await self.portfolio_tools.list_portfolio(source)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        return result
 
     async def news_view(self, symbol: str | None, days: int) -> dict:
         if symbol:

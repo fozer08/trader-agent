@@ -3,22 +3,33 @@
 from copy import deepcopy
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from .state import AgentState
+from .preferences import ConversationPreferences
 
 _RECENT_TURNS_LIMIT = 2
 _TOOL_RESULT_TRUNCATE = 2000
 
 
 class MemoryUpdate(BaseModel):
+    """Modelden gelen state ve özeti birlikte doğrulayıp kısmi hafıza yazmasını önler."""
+
     model_config = ConfigDict(extra="forbid")
 
     state: AgentState
     summary: str = Field(max_length=2000)
 
 
+class MemorySnapshot(MemoryUpdate):
+    """Kalıcı hafızanın şemasını ve tur sayısını dış sınırda doğrular."""
+
+    recent_turns: list[list[dict[str, JsonValue]]] = Field(max_length=2)
+
+
 class ConversationMemory:
+    """Bir oturumun tercih, karar ve yakın geçmişini sınırlı bellekte korur."""
+
     def __init__(self) -> None:
         self.state = AgentState()
         self.summary = ""
@@ -30,6 +41,12 @@ class ConversationMemory:
             "summary": self.summary,
             "recent_turns": deepcopy(self.recent_turns),
         }
+
+    def restore(self, value: object) -> None:
+        snapshot = MemorySnapshot.model_validate(value)
+        self.state = snapshot.state
+        self.summary = snapshot.summary
+        self.recent_turns = snapshot.recent_turns
 
     def messages(self, turn: list[dict]) -> list[dict]:
         return [message for previous in self.recent_turns for message in previous] + turn
@@ -53,8 +70,12 @@ class ConversationMemory:
             "Konuşmalara göre state'i güncelle ve summary yaz. `update_state` tool'unu çağır."
         )
 
-    def apply(self, value: object) -> None:
+    def apply(self, value: object, *, preferences: ConversationPreferences | None = None) -> None:
         update = MemoryUpdate.model_validate(value)
+        if preferences is not None:
+            # Model eski konuşmalardaki tercihi güncel UI seçiminin üstüne yazamaz.
+            update.state.user_context.horizon = preferences.horizon
+            update.state.user_context.risk_level = preferences.risk_level
         self.state, self.summary = update.state, update.summary
 
     def remember(self, turn: list[dict]) -> None:
@@ -67,7 +88,7 @@ class ConversationMemory:
                            if block["type"] not in ("thinking", "redacted_thinking")]
                 if not content:
                     continue
-            recent.append({**message, "content": content})
+            recent.append(deepcopy({**message, "content": content}))
         self.recent_turns.append(recent)
         self.recent_turns = self.recent_turns[-_RECENT_TURNS_LIMIT:]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from sqlalchemy import Integer, String, delete, select
+from sqlalchemy import Integer, String, UniqueConstraint, delete, select, text
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -16,16 +16,22 @@ class WatchlistORM(Base):
     __tablename__ = "watchlist"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False)
+    __table_args__ = (UniqueConstraint("user_id", "symbol"),)
 
 
 class WatchlistRepository:
+    """Kullanıcının en fazla on hisselik listesini atomik olarak saklar."""
+
     def __init__(
         self,
         session_factory: Callable[[], Session],
         stocklist: list[dict],
+        user_id: str = "system",
     ) -> None:
         self._session_factory = session_factory
+        self.user_id = user_id
         self._stocks: dict[str, dict] = {}
         if not isinstance(stocklist, list):
             raise ValueError("Stocklist JSON bir hisse listesi olmalıdır.")
@@ -53,21 +59,8 @@ class WatchlistRepository:
     def list(self) -> list[dict]:
         """Tablodaki hisseler, eklenme sıralarıyla ve temel listedeki adlarıyla."""
         with self._session_factory() as session:
-            symbols = session.scalars(select(WatchlistORM.symbol).order_by(WatchlistORM.id))
+            symbols = session.scalars(select(WatchlistORM.symbol).where(WatchlistORM.user_id == self.user_id).order_by(WatchlistORM.id))
             return [dict(self._stocks[symbol]) for symbol in symbols if symbol in self._stocks]
-
-    def seed_if_empty(self) -> None:
-        """Engine başlangıcında boş tabloyu temel listenin ilk 10 hissesiyle doldurur."""
-        with self._session_factory() as session:
-            if session.scalar(select(WatchlistORM.id).limit(1)) is not None:
-                return
-            symbols = list(self._stocks)[:10]
-            if symbols:
-                session.execute(
-                    insert(WatchlistORM).values([{"symbol": symbol} for symbol in symbols])
-                    .on_conflict_do_nothing(index_elements=["symbol"])
-                )
-                session.commit()
 
     def add(self, symbol: str) -> dict:
         try:
@@ -75,9 +68,14 @@ class WatchlistRepository:
         except KeyError as exc:
             raise ValueError(str(exc.args[0])) from exc
         with self._session_factory() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            symbols = set(session.scalars(select(WatchlistORM.symbol).where(
+                WatchlistORM.user_id == self.user_id)))
+            if entry["symbol"] not in symbols and len(symbols) >= 10:
+                raise ValueError("En fazla 10 hisse takip edebilirsiniz.")
             session.execute(
-                insert(WatchlistORM).values(symbol=entry["symbol"])
-                .on_conflict_do_nothing(index_elements=["symbol"])
+                insert(WatchlistORM).values(symbol=entry["symbol"], user_id=self.user_id)
+                .on_conflict_do_nothing(index_elements=["user_id", "symbol"])
             )
             session.commit()
         return entry
@@ -85,6 +83,6 @@ class WatchlistRepository:
     def remove(self, symbol: str) -> bool:
         symbol = normalize_symbol(symbol)
         with self._session_factory() as session:
-            result = session.execute(delete(WatchlistORM).where(WatchlistORM.symbol == symbol))
+            removed = session.scalar(delete(WatchlistORM).where(WatchlistORM.symbol == symbol, WatchlistORM.user_id == self.user_id).returning(WatchlistORM.symbol))
             session.commit()
-            return result.rowcount > 0
+            return removed is not None

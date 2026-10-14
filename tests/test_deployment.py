@@ -26,19 +26,19 @@ def render(value: str, variables: dict[str, str]) -> str:
     return re.sub(r"\$\{([A-Z_]+):([?-])([^}]*)\}", substitute, value)
 
 
-@pytest.mark.parametrize("service,port_name", [("engine", "ENGINE_PORT"), ("web", "WEB_PORT")])
+@pytest.mark.parametrize("service,port_name", [("engine", "ENGINE_PORT"), ("userui", "USERUI_PORT")])
 def test_compose_listener_mapping_and_connection_follow_configured_ports(service, port_name):
-    variables = {"ENGINE_PORT": "9123", "WEB_PORT": "9124", "ENGINE_URL": "https://remote.example"}
+    variables = {"ENGINE_API_KEY": "test-key", "ENGINE_PORT": "9123", "USERUI_PORT": "9124", "ENGINE_URL": "https://remote.example"}
     config = COMPOSE["services"][service]
     environment = {name: render(str(value), variables) for name, value in config["environment"].items()}
     port = variables[port_name]
     assert environment[port_name] == port
     assert render(config["ports"][0], variables) == f"127.0.0.1:{port}:{port}"
     assert environment["ENGINE_URL"] == "http://engine:9123"
-    assert environment["ENGINE_HOST" if service == "engine" else "WEB_HOST"] == "0.0.0.0"
+    assert environment["ENGINE_HOST" if service == "engine" else "USERUI_HOST"] == "0.0.0.0"
 
 
-@pytest.mark.parametrize("service,port_name", [("engine", "ENGINE_PORT"), ("web", "WEB_PORT")])
+@pytest.mark.parametrize("service,port_name", [("engine", "ENGINE_PORT"), ("userui", "USERUI_PORT")])
 def test_compose_healthcheck_uses_actual_listener_port(service, port_name):
     requests = []
 

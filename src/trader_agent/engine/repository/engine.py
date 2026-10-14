@@ -23,6 +23,6 @@ def init_schema(engine: Engine) -> None:
     """Tanımlı ORM tablolarını yoksa yaratır."""
     # ORM modellerinin metadata'ya kaydı için import gerekli — class tanımı
     # decorator'leri çalıştığında Base.metadata otomatik dolar.
-    from . import news, portfolio, watchlist  # noqa: F401
+    from . import news, portfolio, watchlist, preferences, conversations, recommendations  # noqa: F401
 
     Base.metadata.create_all(engine)

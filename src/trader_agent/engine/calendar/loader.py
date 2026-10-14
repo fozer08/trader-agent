@@ -10,10 +10,15 @@ from pydantic import BaseModel, Field, StrictInt, field_validator, model_validat
 
 from ...config.market import MarketConfig, WEEKDAYS
 from ...utils.time import TimeField
-from .core import DaySchedule, ExchangeSchedule, TradingCalendar, TradingSession
+from .core import ExchangeSchedule, TradingCalendar, TradingDay, TradingSession
 
 
 class _CalendarEntry(BaseModel):
+    """JSON tatil kayıtlarının ortak tarih ve ad şemasını tek yerde doğrular.
+
+    Yalnız yükleme sınırında kullanılır; runtime'a Pydantic modeli taşınmaz.
+    """
+
     model_config = {"extra": "forbid"}
 
     date: dt.date
@@ -31,10 +36,18 @@ class _CalendarEntry(BaseModel):
 
 
 class _ClosedDay(_CalendarEntry):
+    """Tam gün tatilin saat içermemesini şemada güvenceye almak için vardır."""
+
     type: Literal["closed"]
 
 
 class _HalfDay(_CalendarEntry):
+    """Yarım günün saat alanlarını doğrular ve zorunlu kapanışını tanımlar.
+
+    Normal seansa göre geçerliliğini TradingCalendar denetler; bu model
+    yalnız dış verinin biçiminden sorumludur.
+    """
+
     type: Literal["half_day"]
     close: TimeField
     open: TimeField | None = None
@@ -42,6 +55,12 @@ class _HalfDay(_CalendarEntry):
 
 
 class _CalendarDocument(BaseModel):
+    """Dosyanın kapsamını ve kayıtlarını yüklemeden önce birlikte doğrular.
+
+    Tekrarlanan yıl ve tarihleri reddederek dönüşüm sırasında kayıtların
+    sessizce birbirini ezmesini önler; tatil türüne göre doğru şemayı seçer.
+    """
+
     model_config = {"extra": "forbid"}
 
     exchange: str = Field(min_length=1)
@@ -74,16 +93,16 @@ def load_calendar(config: MarketConfig) -> TradingCalendar:
         timezone=ZoneInfo(exchange.timezone),
         weekdays=tuple(WEEKDAYS.index(day) for day in exchange.weekdays),
     )
-    exceptions = {}
+    exceptions: dict[dt.date, TradingDay] = {}
     for entry in document.days:
         if isinstance(entry, _ClosedDay):
-            day = DaySchedule(entry.date, "closed", None, entry.name)
+            day = TradingDay(entry.date, "closed", None, entry.name)
         else:
             session = TradingSession(
                 dt.datetime.combine(entry.date, entry.open or schedule.start, schedule.timezone),
                 dt.datetime.combine(entry.date, entry.close, schedule.timezone),
                 dt.datetime.combine(entry.date, entry.daily_close or entry.close, schedule.timezone),
             )
-            day = DaySchedule(entry.date, "half_day", session, entry.name)
+            day = TradingDay(entry.date, "half_day", session, entry.name)
         exceptions[entry.date] = day
     return TradingCalendar(schedule, exceptions, frozenset(document.covered_years))

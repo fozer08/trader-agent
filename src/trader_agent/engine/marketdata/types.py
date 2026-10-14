@@ -6,8 +6,13 @@ from enum import Enum
 from typing import Literal
 
 
+OHLCQuality = Literal["reported", "range_only", "sampled", "close_only"]
+
+
 @dataclass(frozen=True)
 class PriceQuote:
+    """Agent ve web için fiyatın zamanı, türü ve karşılaştırma kapanışını birlikte taşır."""
+
     symbol: str
     price: float | None
     as_of: datetime | None
@@ -43,6 +48,8 @@ class OHLCV:
     """Bir zaman aralığının başlangıcı ile fiyat ve hacim değerleri.
 
     Aralığın tamamlanmış olup olmadığı bu veriyi taşıyan yapının sözleşmesidir.
+    ohlc_kind, örneklenen veya kapanışla doldurulan aralıkların gerçek OHLC
+    gerektiren hesaplarda kullanılmasını önlemek için kaynak kalitesini taşır.
     """
 
     period_start: datetime
@@ -51,6 +58,7 @@ class OHLCV:
     low: float
     close: float
     volume: float | None
+    ohlc_kind: OHLCQuality = "reported"
 
 
 @dataclass(frozen=True)

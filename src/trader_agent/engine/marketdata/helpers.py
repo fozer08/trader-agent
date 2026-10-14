@@ -154,6 +154,10 @@ def _aggregate_bucket(
         low=low,
         close=close,
         volume=volume,
+        ohlc_kind=("close_only" if any(b.ohlc_kind == "close_only" for b in bucket)
+                   else "sampled" if any(b.ohlc_kind == "sampled" for b in bucket)
+                   else "range_only" if any(b.ohlc_kind == "range_only" for b in bucket)
+                   else "reported"),
     )
 
 

@@ -6,7 +6,7 @@ from string import Template
 from zoneinfo import ZoneInfo
 
 from ..calendar import TradingCalendar, TradingSession
-from .prompts import CONTEXT_PROMPT, FORMAT_PROMPTS, SYSTEM_PROMPT
+from .prompts import CONTEXT_PROMPT, FORMAT_PROMPTS, SYSTEM_PROMPT, SYSTEM_PROMPT_RECOMMENDATIONS
 
 
 def _render_prompt(template: str, **values: str) -> str:
@@ -19,7 +19,7 @@ def format_instructions(output_format: str) -> str:
 
 def build_system(watchlist: Sequence[Mapping[str, str]], output_format: str) -> str:
     return _render_prompt(
-        SYSTEM_PROMPT,
+        SYSTEM_PROMPT + "\n" + SYSTEM_PROMPT_RECOMMENDATIONS,
         watchlist_count=str(len(watchlist)),
         watchlist_lines="\n".join(
             f"  {entry['symbol']}: {entry.get('name', entry['symbol'])}" for entry in watchlist
@@ -53,7 +53,8 @@ def build_context(
         if next_open:
             session_timing = f"Sonraki Seans: {next_open:%d.%m.%Y %H:%M}"
     feed_delay = (
-        f"Veri Gecikmesi: {delay_minutes} dakika"
+        f"Sağlayıcının seans içi yayın gecikmesi: {delay_minutes} dakika. "
+        "Bu süre kapanış verisinin yaşı değildir; fiyatın tarihi araçtaki as_of alanıdır."
         if delay_minutes and delay_minutes >= 5
         else ""
     )

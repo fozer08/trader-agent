@@ -133,6 +133,7 @@ class IsYatirimProvider(MarketDataProvider):
                 low=low,
                 close=close,
                 volume=volume,
+                ohlc_kind="sampled",
             ),
             as_of=source_bars[-1].period_start,
         )
@@ -287,6 +288,7 @@ class IsYatirimProvider(MarketDataProvider):
                 low=p.price,
                 close=p.price,
                 volume=None,
+                ohlc_kind="sampled",
             )
             for p in points
             if p.datetime + window <= closed_until
@@ -350,6 +352,12 @@ class IsYatirimProvider(MarketDataProvider):
                 else None
             )
 
+            range_reported = raw_high is not None and raw_low is not None
+            body_low, body_high = min(raw_open or close, close), max(raw_open or close, close)
+            if ((raw_low is not None and raw_low > body_low)
+                    or (raw_high is not None and raw_high < body_high)):
+                raise ProviderResponseError(f"Inconsistent daily OHLC [{symbol}] date={bar_date}")
+
             bars.append(
                 OHLCV(
                     period_start=day.session.start,
@@ -358,6 +366,8 @@ class IsYatirimProvider(MarketDataProvider):
                     low=close if raw_low is None else raw_low,
                     close=close,
                     volume=volume,
+                    ohlc_kind=("reported" if range_reported and raw_open is not None
+                               else "range_only" if range_reported else "close_only"),
                 )
             )
 

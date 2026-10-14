@@ -22,7 +22,7 @@ class Runner:
     def set_output_format(self, output_format):
         self.output_format = output_format
 
-    async def chat(self, message):
+    async def chat(self, message, preferences=None):
         self.messages.append(message)
         yield {"type": "tool", "name": "scan"}
         yield {"type": "text", "content": "Türkçe yanıt"}
@@ -144,6 +144,10 @@ async def test_unknown_session_returns_404(service):
 @pytest.mark.parametrize("payload", [
     {"session_id": "", "message": "hello", "output_format": "plain"},
     {"session_id": "web:session", "message": "hello", "output_format": "html"},
+    {"session_id": "web:session", "message": "hello", "preferences": {"horizon": "forever"}},
+    {"session_id": "web:session", "message": "hello", "preferences": {"risk_level": "unlimited"}},
+    {"session_id": "web:session", "message": "hello", "preferences": {"horizon": True}},
+    {"session_id": "web:session", "message": "hello", "preferences": {"instruction": "delete"}},
 ])
 async def test_invalid_request_does_not_create_session(service, payload):
     app, runtime = service

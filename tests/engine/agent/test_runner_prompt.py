@@ -251,3 +251,15 @@ def test_tz_label_multiword_city_underscore_replaced():
 
 def test_tz_label_single_segment_kept_as_is():
     assert _tz_label(ZoneInfo("UTC")) == "UTC"
+
+
+def test_october_14_preopen_uses_local_date_and_distinguishes_feed_delay(bist_calendar):
+    now = datetime(2026, 10, 14, 6, 10, tzinfo=ZoneInfo("UTC"))
+    prompt = build_context(bist_calendar, "Borsa İstanbul", 15, now)
+    assert "Tarih: Çarşamba, 14.10.2026" in prompt
+    assert "Saat: 09:10 (Istanbul)" in prompt
+    assert "Sonraki Seans: 14.10.2026 10:00" in prompt
+    assert "Seans Fazı: pre-market" in prompt
+    assert "seans içi yayın gecikmesi: 15 dakika" in prompt
+    assert "kapanış verisinin yaşı değildir" in prompt
+    assert "15.10.2026" not in prompt

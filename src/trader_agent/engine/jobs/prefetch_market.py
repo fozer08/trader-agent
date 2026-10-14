@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
+from ..analysis import policy_for
 from ..marketdata.service import MarketService
 from ...utils.logging import get_logger
 
 _log = get_logger(__name__)
 
-# Daily prefetch periyodu — analysis tool'ları (scan, indicators) tipik olarak
-# 30-100 bar arası kullanıyor; 200 fazlasıyla yeterli.
-_DEFAULT_PERIOD = 200
+# Warm the longest supported horizon; analysis remains the source of window sizes.
+_DEFAULT_PERIOD = policy_for("position").history_bars
 
 
 async def run(
